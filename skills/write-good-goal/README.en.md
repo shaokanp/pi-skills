@@ -2,13 +2,50 @@
 
 [繁體中文](./README.md) | English
 
-Write Good Goal turns a vague, oversized, or predictably blocked task into an
-executable goal that can be pasted directly into Codex or Claude Code Goal Mode.
-It checks feasibility before writing the objective, boundary, auditable Done
-criteria, round-selection loop, human gates, and pause/resume conditions.
+Give Write Good Goal a vague, oversized, or predictably blocked coding-agent
+task. It checks feasibility, then returns goal text that can be pasted into
+Codex or Claude Code: explicit boundaries, agent-achievable Done criteria,
+round-selection rules, and any necessary follow-up or human gates.
 
-The point is not to make the request longer. The point is to tell the agent how
-to make progress, how to know it is done, and when to pause honestly.
+It writes the goal; it does not execute it or expand it into a full project
+plan. The point is to tell the agent how to make progress, how to know it is
+done, and when to pause honestly.
+
+## When To Use It
+
+Use Write Good Goal to:
+
+- write, refine, or audit Codex or Claude Code goal text;
+- turn a large coding-agent task into a bounded multi-round objective;
+- repair Done criteria that depend on future evidence, elapsed time, or human
+  decisions; or
+- separate future acceptance from current implementation.
+
+Do not use it to:
+
+- execute the goal or assemble an agent team;
+- expand the goal into a full project plan or ticket set;
+- write a business OKR or personal goal without coding-agent context; or
+- replace product, policy, or safety approval.
+
+## Get Started
+
+Requires Git, Bash, Python 3, and `rsync`. After cloning this repository, run
+from its root; see [repository Install](../../README.md#install) for the complete
+installation path:
+
+```bash
+bash scripts/install-skill.sh write-good-goal \
+  --target-root "${CODEX_HOME:-$HOME/.codex}/skills" \
+  --execute
+```
+
+Example prompt:
+
+```text
+Use $write-good-goal to turn this project into a goal that can make progress
+without pretending future production evidence already exists.
+```
 
 ## What It Solves
 
@@ -75,7 +112,7 @@ Done:
 - [Observable, verifiable criterion.]
 
 Follow-Up Gate:
-- [Future evidence that cannot exist during this run.]
+- [Optional; future evidence that cannot exist during this run.]
 
 Loop:
 Before each round, compare up to three next moves by expected increment,
@@ -93,8 +130,9 @@ Round Report:
 - next decision
 ```
 
-Add `Feasibility Warning` or `Risk / Pause Plan` only when the goal genuinely
-needs one.
+When no later acceptance evidence is needed, omit the entire `Follow-Up Gate`
+heading and block. Add `Feasibility Warning` or `Risk / Pause Plan` only when
+the goal genuinely needs one.
 
 ## Before / After
 
@@ -131,6 +169,13 @@ that best advances Done. Do not exceed five consecutive Capability-only rounds.
 
 Human Gate:
 Ask only for rollout approval or product judgment on the acceptance threshold.
+
+Round Report:
+- selected move
+- increment type
+- expected and actual state change
+- verification
+- next decision
 ```
 
 The engineering goal can now complete. The two-week observation remains visible
@@ -165,40 +210,6 @@ A pause report includes:
 
 A paused goal is not a completed goal. It is stopped at an honest, resumable
 boundary.
-
-## When To Use It
-
-Use Write Good Goal to:
-
-- write or refine a Codex or Claude Code goal;
-- turn a large task into a bounded multi-round objective;
-- audit whether a goal is actually feasible and verifiable;
-- design an agent loop, dynamic workflow, or long-running project objective; or
-- separate future acceptance from current implementation.
-
-Do not use it to:
-
-- execute the goal itself;
-- expand the goal into a full project plan or ticket set;
-- replace product, policy, or safety approval; or
-- hide missing pass conditions behind vague quality language.
-
-## Get Started
-
-Install the skill:
-
-```bash
-bash scripts/install-skill.sh write-good-goal \
-  --target-root "${CODEX_HOME:-$HOME/.codex}/skills" \
-  --execute
-```
-
-Example prompt:
-
-```text
-Use $write-good-goal to turn this project into a goal that can make progress
-without pretending future production evidence already exists.
-```
 
 ## Detailed Specifications
 

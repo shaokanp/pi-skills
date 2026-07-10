@@ -91,7 +91,7 @@ Use agent-workflow for this broad migration and keep durable workflow state.
 
 Expected behavior:
 
-- Create `.workflow/<slug>/` with `plan.md`, `state.json`, `token-usage.json`, `orchestration.md`, `orchestration.json`, `rounds/round-001/lane-runs/`, `integration.json`, `integration.md`, and `final-report.md`.
+- Create `.workflow/<slug>/` with `plan.md`, `state.json`, `token-usage.json`, `orchestration.md`, `orchestration.json`, `rounds/round-001/lane-runs/`, `rounds/round-001/integration.json`, `rounds/round-001/integration.md`, and `final-report.md`.
 - Use `scripts/new_workflow.py` when available.
 - Use `scripts/verify_workflow.py --mode scaffold` for a fresh scaffold.
 - Use `scripts/verify_workflow.py --mode planned` after orchestration is populated and before the first dispatch. Routed scaffolds must replace every `draft` decision first.

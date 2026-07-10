@@ -1,6 +1,6 @@
 ---
 name: write-good-goal
-description: Use this skill when the user wants to write, refine, or audit a Codex goal, Claude Code goal, goal-mode prompt, multi-round agent task, agent loop, dynamic workflow, or long-running project objective. Produce concise goal text with feasibility checks, boundaries, auditable done criteria, progress selection, minimal human gates, and round reporting.
+description: Write, refine, or audit paste-ready Codex or Claude Code goal text with feasible scope, explicit boundaries, agent-achievable Done criteria, progress selection, and human or follow-up gates. Use for goal-mode prompts, multi-round coding-agent objectives, or criteria that depend on future evidence or human decisions. Use agent-workflow to execute the team or loop; handle ordinary project plans directly.
 ---
 
 # Write Good Goal
@@ -61,6 +61,9 @@ Write in the user's language. Use this structure unless the context clearly
 requires a smaller version. Under the default 4000-character limit, preserve
 `Goal`, `Boundary`, `Done`, `Loop`, `Human Gate`, and `Round Report`; include
 optional sections only when needed.
+
+When no later acceptance evidence is needed, omit the `Follow-Up Gate` heading
+and block entirely. Never emit an empty optional section.
 
 If feasibility risk exists, put this before the goal:
 

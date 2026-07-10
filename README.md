@@ -1,16 +1,23 @@
 # pi-skills
 
-`pi-skills` is a curated monorepo of portable agent skills. The repository is
-the single source of truth: the same validated skill directories are installed
-locally and published for other people to use.
+`pi-skills` is a curated monorepo of portable instruction contracts for agent
+runtimes. Each skill tells a compatible agent when to use a specialized process
+and how to carry it out. A skill does not add permissions, tools, subagents, a
+scheduler, or a background daemon that the runtime does not already provide.
 
-## Skills
+## Choose A Skill
 
-| Skill | Status | Purpose |
-| --- | --- | --- |
-| `explain` | Stable | Evidence-first explanations of technical systems, specs, diffs, workflows, and multi-round progress. |
-| `agent-workflow` | Experimental | Planner-first multi-agent workflow harness with durable state, review, challenge, verification, and iteration. |
-| `write-good-goal` | Stable | Concise, feasible agent goals with auditable completion and follow-up gates. |
+| Skill | Status | Use when | You get | Not for |
+| --- | --- | --- | --- | --- |
+| `explain` | Stable | You need to understand a non-trivial system, spec, diff, artifact, or multi-round history. | An evidence-backed explanation of structure, mechanism, status, and boundaries. | Correctness review or implementation. |
+| `agent-workflow` | Experimental | You want the current runtime to coordinate an agent team, subagents, or a gated multi-round loop. | Planner-selected lanes and durable state. A passing run delivers the work; an early stop records the proven state, blocker, and resume condition. | Ordinary single-agent work or an unattended daemon. |
+| `write-good-goal` | Stable | You want to create, refine, or audit a paste-ready coding-agent goal. | A bounded goal contract with achievable Done criteria and honest follow-up or human gates. | Executing the goal or writing a full project plan. |
+
+`Stable` means the public contract is intended to remain backward-compatible.
+`Experimental` means the contract is useful but may still change between minor
+releases. Repository preflight validates structure, available regressions,
+packaging, and public-safety rules; neither label nor preflight proves semantic
+correctness for every task.
 
 `agent-workflow` is the canonical skill id. The internal `.workflow` schema
 keeps its existing `agent-loops.*` prefix for backward compatibility.
@@ -24,6 +31,16 @@ keeps its existing `agent-loops.*` prefix for backward compatibility.
 | `write-good-goal` | [Guide](skills/write-good-goal/README.md) | [Guide](skills/write-good-goal/README.en.md) |
 
 ## Install
+
+Prerequisites: Git, Bash, Python 3, and `rsync`. Gitleaks is required only for
+the public-publishing checks described below.
+
+Clone the repository and run the commands from its root:
+
+```bash
+git clone https://github.com/shaokanp/pi-skills.git
+cd pi-skills
+```
 
 Choose the skills directory used by your agent runtime and run a dry-run first:
 

@@ -1,7 +1,7 @@
 ---
 name: agent-workflow
 description: |
-  Use for agent workflow, agent team workflow, agent loop workflow, multi-agent harness loops, dynamic subagent orchestration, or requests to have an agent team discover, plan, implement, review, challenge, verify, and iterate. Do not trigger on the bare word workflow alone; route ordinary single-agent plans, reviews, or implementation directly.
+  Orchestrate multi-agent work with planner-selected lanes, durable round state, independent review or challenge, verification gates, and repair when gates fail. Use when the user asks to run an agent team, subagents, or a gated multi-round loop, especially for broad or high-risk work. Use write-good-goal for paste-ready goal text; handle ordinary single-agent planning, review, and implementation directly.
 ---
 
 # Agent Workflow
@@ -178,7 +178,11 @@ After lanes complete, synthesize decisions instead of dumping transcripts:
 
 Record accepted and rejected work, conflicts, repair packets, verification evidence, remaining risks, and the next-round or stop reason.
 
-In a run workspace, write machine-readable decisions to `integration.json`, human-readable decisions to `integration.md`, final results to `final-report.md`, workflow token accounting to `token-usage.json`, and the native event snapshot evidence to `token-evidence.json`.
+In a run workspace, write round decisions to
+`rounds/<round-id>/integration.json` and
+`rounds/<round-id>/integration.md`, final results to `final-report.md`, workflow
+token accounting to `token-usage.json`, and native event snapshot evidence to
+`token-evidence.json`.
 The final report and final user response must include `total_tokens`, source, and confidence.
 
 If card display was active, the final response should include the final Swarm Card status or a concise equivalent summary: completed, paused, blocked, or human-gated; round count; gate result; unresolved P2+ count; and any P3 follow-up.

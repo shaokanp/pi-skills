@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Reworked all three skill descriptions around distinct trigger branches and
+  explicit routing boundaries between explanation, goal drafting, multi-agent
+  execution, and ordinary direct work.
+- Reordered the bilingual guides so first-time readers see when to use each
+  skill, what it produces, what it does not do, and how to start before deep
+  mechanics.
+- Corrected Agent Workflow integration artifact paths, qualified native versus
+  simulated execution and token provenance, added an Explain completion gate,
+  and aligned the Write Good Goal example and optional sections with its
+  executable contract.
+- Added a repository-level skill chooser, defined maturity and preflight claims,
+  and documented the clone-and-run-from-root installation prerequisite.
 - Added Traditional Chinese and English guides for `explain` and
   `write-good-goal`, including visual flows, worked examples, and boundaries.
 - Added Traditional Chinese and English Agent Workflow guides with architecture,

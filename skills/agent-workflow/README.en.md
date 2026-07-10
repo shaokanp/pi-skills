@@ -2,14 +2,56 @@
 
 [繁體中文](./README.md) | English
 
-Agent Workflow is a planner-first multi-agent collaboration harness. It lets a
-Lead Agent compile a goal into an executable team plan, then dynamically combine
-discovery, planning, implementation, review, challenge, verification, and repair
-lanes until the work passes, reaches a human decision, or hits an explicit stop
-condition.
+Give Agent Workflow a goal that needs multiple agents, independent quality
+checks, or multi-round repair. A Lead Agent selects the team, lanes, gates, and
+stop conditions before coordinating execution, integration, and the quality
+lanes that apply; repair opens only when a gate fails. A passing run delivers
+the work. A human-gated, blocked, or budget-limited run reports the proven state,
+stop reason, and resume condition.
 
-It is more than "spawn several agents at once." It provides state, quality
-gates, and bounded multi-round iteration.
+When the runtime exposes native subagents, the Lead creates a real agent team.
+Otherwise it can only run an explicitly labeled sequential simulation and must
+not claim that subagents ran. This is a Lead-executed harness inside the current
+agent runtime, not an unattended runner daemon.
+
+## When To Use It
+
+Use Agent Workflow when:
+
+- the user explicitly requests an agent workflow, agent team, swarm, or agent loop;
+- the task needs multi-round repair and verification;
+- a specification, research, or strategy problem needs structured disagreement;
+- cross-module implementation needs seam review and independent quality gates; or
+- the team needs resumable and auditable collaboration artifacts.
+
+Do not use it for:
+
+- a small change that one agent can complete directly;
+- an ordinary plan, review, explanation, or paste-ready goal-text request;
+- the bare word "workflow" without multi-agent intent; or
+- a background scheduler, queue, or unattended daemon.
+
+Use the smallest harness that materially raises confidence. Agent count is not
+a goal by itself.
+
+## Get Started
+
+Requires Git, Bash, Python 3, and `rsync`. After cloning this repository, run
+from its root; see [repository Install](../../README.md#install) for the complete
+installation path:
+
+```bash
+bash scripts/install-skill.sh agent-workflow \
+  --target-root "${CODEX_HOME:-$HOME/.codex}/skills" \
+  --execute
+```
+
+Then make the workflow intent explicit in a task:
+
+```text
+Use $agent-workflow to review this change, repair any P2+ findings,
+and iterate until independent verification passes.
+```
 
 ## What It Solves
 
@@ -21,12 +63,14 @@ constraints:
   dependencies, gates, and stop conditions first.
 - **Persist workflow state**: agents and rounds share contracts, outputs,
   evidence, and decisions under `.workflow/<slug>/`.
-- **Use independent quality checks**: a writer cannot pass its own work using
-  self-confidence alone; review, challenge, and verify use independent identities.
+- **Prevent self-approval**: a writer cannot pass its own work using
+  self-confidence alone. Native runs use independent agent identities;
+  simulations must label role separation and execution limits clearly.
 - **Feed failures into the next round**: verification can create a bounded repair
   packet and open a new `repair -> verify` round.
 - **Make completion auditable**: the final gate requires evidence, finding
-  resolution, terminal agent lifecycle, and exact token accounting.
+  resolution, and terminal agent lifecycle. Exact token accounting accepts only
+  complete runtime event evidence and is labeled Lead-recorded provenance.
 
 ## How It Works
 
@@ -155,9 +199,9 @@ For multi-round work, collaboration, or resumable state, the Lead Agent creates:
 ├── rounds/
 │   └── round-001/
 │       ├── lane-runs/
-│       └── receipts/
-├── integration.json
-├── integration.md
+│       ├── receipts/          # optional efficiency artifacts
+│       ├── integration.json
+│       └── integration.md
 └── final-report.md
 ```
 
@@ -186,44 +230,9 @@ they do not spawn agents.
   session reasoning effort is inherited across the workflow, and the router
   never changes effort per lane.
 - **Exact token accounting**: computes Lead and registered-attempt usage from
-  native runtime session events. Missing evidence fails closed instead of being
-  replaced by an estimate labeled exact.
-
-## When To Use It
-
-Use Agent Workflow when:
-
-- the user explicitly requests an agent workflow, agent team, swarm, or agent loop;
-- the task needs multi-round repair and verification;
-- a specification, research, or strategy problem needs structured disagreement;
-- cross-module implementation needs seam review and independent quality gates; or
-- the team needs resumable and auditable collaboration artifacts.
-
-Do not use it for:
-
-- a small change that one agent can complete directly;
-- an ordinary request for a plan, review, or explanation; or
-- the bare word "workflow" without multi-agent intent.
-
-The governing principle is to use the smallest harness that materially raises
-confidence, not to add agents for the appearance of a swarm.
-
-## Get Started
-
-Install the skill:
-
-```bash
-bash scripts/install-skill.sh agent-workflow \
-  --target-root "${CODEX_HOME:-$HOME/.codex}/skills" \
-  --execute
-```
-
-Then make the workflow intent explicit in a task:
-
-```text
-Use $agent-workflow to review this change, repair any P2+ findings,
-and iterate until independent verification passes.
-```
+  native runtime session events and stores Lead-recorded provenance bound to the
+  event evidence. Missing evidence fails closed instead of being replaced by an
+  estimate labeled exact.
 
 ## Detailed Specifications
 

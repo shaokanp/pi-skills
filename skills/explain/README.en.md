@@ -2,13 +2,52 @@
 
 [繁體中文](./README.md) | English
 
-Explain is an evidence-first comprehension interface. It turns a technical
-system, specification, diff, workflow, artifact, or multi-round history into an
-explanation packet that can be understood in one pass: what it is, why it
+Give Explain a complex technical system, specification, diff, workflow,
+artifact, or multi-round history. It reads current evidence first, then returns
+an explanation packet that can be understood in one pass: what it is, why it
 matters, how it works, where the boundaries are, and what remains unproven.
 
-Its job is not to make the subject shallow. Its job is to reorganize complexity
-into a shape a reader can reason about.
+Explain reorganizes complexity instead of making the subject shallow. It does
+not judge correctness or implement changes; use the appropriate review workflow
+first when judgment is needed, then use Explain to communicate the result.
+
+## When To Use It
+
+Use Explain for questions such as:
+
+- "How does this system actually work?"
+- "What is this specification really trying to build?"
+- "What happened across these agent workflow rounds?"
+- "Which responsibilities and runtime behaviors changed in this diff?"
+- "What is complete, and what is still missing?"
+- "Show it with a diagram, timeline, or concrete example."
+
+Do not use it to:
+
+- answer a simple fact or only reformat information;
+- find bugs or perform code review, audit, or blame analysis;
+- challenge a plan;
+- implement changes; or
+- quiz the user.
+
+## Get Started
+
+Requires Git, Bash, Python 3, and `rsync`. After cloning this repository, run
+from its root; see [repository Install](../../README.md#install) for the complete
+installation path:
+
+```bash
+bash scripts/install-skill.sh explain \
+  --target-root "${CODEX_HOME:-$HOME/.codex}/skills" \
+  --execute
+```
+
+Example prompt:
+
+```text
+Use $explain to show me what changed across these three workflow rounds,
+why it matters, and what is still not proven.
+```
 
 ## What It Solves
 
@@ -116,29 +155,6 @@ When explaining existing state, prefer:
 When evidence is incomplete, Explain says "I did not see evidence that..."
 instead of turning absence from the checked material into proof of nonexistence.
 
-## When To Use It
-
-Use Explain for questions such as:
-
-- "How does this system actually work?"
-- "What is this specification really trying to build?"
-- "What happened across these agent workflow rounds?"
-- "Which responsibilities and runtime behaviors changed in this diff?"
-- "What is complete, and what is still missing?"
-- "Show it with a diagram, timeline, or concrete example."
-
-Do not use it to:
-
-- find bugs or correctness problems;
-- perform code review, audit, or blame analysis;
-- challenge a plan;
-- implement changes; or
-- quiz the user.
-
-Explain is a comprehension interface, not a correctness review. If the user
-needs both, run the appropriate review workflow and use Explain to communicate
-the result.
-
 ## Language And Audience
 
 The default reader understands ordinary product, engineering, and CS concepts
@@ -149,23 +165,6 @@ responsible for.
 Reply in the user's language. When Chinese is requested without a specified
 variant, default to Traditional Chinese. Keep APIs, commands, paths, and code
 identifiers in their original English form.
-
-## Get Started
-
-Install the skill:
-
-```bash
-bash scripts/install-skill.sh explain \
-  --target-root "${CODEX_HOME:-$HOME/.codex}/skills" \
-  --execute
-```
-
-Example prompt:
-
-```text
-Use $explain to show me what changed across these three workflow rounds,
-why it matters, and what is still not proven.
-```
 
 ## Detailed Specifications
 

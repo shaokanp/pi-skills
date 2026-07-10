@@ -1,6 +1,6 @@
 ---
 name: explain
-description: Use this skill when the user asks to understand technical, spec-heavy, workflow-heavy, code-change, artifact, diff, goal-progress, or multi-round agent work clearly. Also use it when the user asks for plain language, less jargon, what changed, whether work is complete, what happened across many rounds, or requests diagrams, UML, tables, timelines, or a concrete example. This is an explanation and comprehension interface, not a correctness review.
+description: Explain complex technical or project material as an evidence-backed comprehension packet covering structure, mechanism, boundaries, and current status. Use for specs, architecture, workflows, diffs, artifacts, or multi-round progress when the user asks how it works, what changed, or what is actually complete. Answer simple facts directly; use agent-workflow to execute multi-agent work and review or audit modes to judge correctness.
 ---
 
 # Explain
@@ -71,6 +71,22 @@ Use this order unless a smaller answer is clearly sufficient:
 8. A status table, timeline, or other external representation for progress.
 9. `Worked example`.
 10. `What to notice`.
+
+## Completion Check
+
+Before responding, confirm every applicable item is satisfied:
+
+- The explanation is grounded in current evidence, or its evidence limit is
+  stated explicitly.
+- Project-specific terms are defined by responsibility before shorthand is used.
+- The packet includes the sections needed to understand the subject without
+  forcing optional sections into a small answer.
+- A non-trivial subject has a fitting visual representation and one worked
+  example; a simple answer omits them when they add no clarity.
+- Boundaries distinguish confirmed exclusions from claims that are merely
+  unsupported by the checked evidence.
+- The answer explains rather than silently reviewing, auditing, or implementing
+  the subject.
 
 ## Evidence Rules
 

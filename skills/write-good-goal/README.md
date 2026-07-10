@@ -2,13 +2,47 @@
 
 繁體中文 | [English](./README.en.md)
 
-Write Good Goal 把模糊、過大或容易卡住的任務，整理成可以直接貼進 Codex 或
-Claude Code Goal Mode 的可執行 goal。它會先檢查 feasibility，再寫 objective、
-boundary、可稽核的 Done criteria、round selection loop、human gates 與 pause/resume
-條件。
+把一個模糊、過大或容易卡住的 coding-agent 任務交給 Write Good Goal，它會先檢查
+feasibility，再回傳一份可以直接貼進 Codex 或 Claude Code 的 goal contract：明確
+boundary、agent-achievable Done criteria、每輪選擇方式，以及必要的 follow-up 或
+human gates。
 
-重點不是把要求寫得更長，而是讓 agent 知道怎麼前進、怎麼判斷完成，以及什麼時候
-應該誠實暫停。
+它產出 goal text，不執行 goal，也不把 goal 膨脹成完整 project plan。重點不是把
+要求寫得更長，而是讓 agent 知道怎麼前進、怎麼判斷完成，以及何時應該誠實暫停。
+
+## 何時使用
+
+適合：
+
+- 撰寫、改進或稽核 Codex / Claude Code goal text
+- 把大型 coding-agent 任務變成 bounded multi-round objective
+- 修正依賴 future evidence、elapsed time 或 human decision 的 Done criteria
+- 把 future acceptance 與 current implementation 分開
+
+不適合：
+
+- 直接執行 goal 或組建 agent team
+- 把 goal 展開成完整 project plan 或 tickets
+- 一般 business OKR 或沒有 coding-agent context 的個人目標
+- 取代產品、政策或安全 approval
+
+## 開始使用
+
+需要 Git、Bash、Python 3 與 `rsync`。Clone 此 repository 後，從 repository root
+執行；完整安裝說明見 [repository Install](../../README.md#install)：
+
+```bash
+bash scripts/install-skill.sh write-good-goal \
+  --target-root "${CODEX_HOME:-$HOME/.codex}/skills" \
+  --execute
+```
+
+使用範例：
+
+```text
+Use $write-good-goal to turn this project into a goal that can make progress
+without pretending future production evidence already exists.
+```
 
 ## 它解決什麼問題
 
@@ -71,7 +105,7 @@ Done:
 - [可觀察、可驗證的 criterion]
 
 Follow-Up Gate:
-- [本輪不可能取得的 future evidence]
+- [Optional；本輪不可能取得的 future evidence]
 
 Loop:
 Before each round, compare up to three next moves by expected increment,
@@ -89,6 +123,7 @@ Round Report:
 - next decision
 ```
 
+沒有 later acceptance evidence 時，省略整個 `Follow-Up Gate` heading 與 block。
 只有在真的需要時，才加入 `Feasibility Warning` 或 `Risk / Pause Plan`。
 
 ## Before / After
@@ -125,6 +160,13 @@ Loop:
 
 Human Gate:
 只有 rollout approval 或 acceptance threshold 需要產品判斷時才詢問。
+
+Round Report:
+- selected move
+- increment type
+- expected and actual state change
+- verification
+- next decision
 ```
 
 主要工程 goal 現在可以完成；兩週 observation 仍被保留，但不會被偽裝成本輪已完成的
@@ -157,40 +199,6 @@ Pause report 必須包含：
 - 支援時可加入 monitor 或 scheduled check
 
 Paused goal 不是 completed goal；它只是停在一個可以誠實恢復的位置。
-
-## 何時使用
-
-適合：
-
-- 撰寫或改進 Codex / Claude Code goal
-- 把大型任務變成 bounded multi-round objective
-- 稽核 goal 是否真的可完成、可驗證
-- 設計 agent loop、dynamic workflow 或 long-running project objective
-- 把 future acceptance 與 current implementation 分開
-
-不適合：
-
-- 直接執行 goal 內容
-- 把 goal 展開成完整 project plan 或 tickets
-- 取代產品、政策或安全 approval
-- 用模糊品質詞彙掩蓋沒有 pass condition
-
-## 開始使用
-
-安裝 skill：
-
-```bash
-bash scripts/install-skill.sh write-good-goal \
-  --target-root "${CODEX_HOME:-$HOME/.codex}/skills" \
-  --execute
-```
-
-使用範例：
-
-```text
-Use $write-good-goal to turn this project into a goal that can make progress
-without pretending future production evidence already exists.
-```
 
 ## 詳細規格
 

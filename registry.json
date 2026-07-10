@@ -4,30 +4,30 @@
     {
       "id": "explain",
       "display_name": "Explain",
-      "description": "Evidence-first explanations for technical systems, specs, diffs, workflows, and multi-round progress, using plain language and fit-for-purpose diagrams.",
+      "description": "Explain complex technical or project material as an evidence-backed packet covering structure, mechanism, status, and boundaries.",
       "source": "skills/explain",
       "production_target": "explain",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "status": "stable",
       "visibility": "public"
     },
     {
       "id": "agent-workflow",
       "display_name": "Agent Workflow",
-      "description": "Planner-first agent workflow harness with durable workflow state, lane contracts, review, challenge, verify, and iteration.",
+      "description": "Orchestrate agent teams and gated multi-round loops with planned lanes, durable state, challenge, verification, and repair.",
       "source": "skills/agent-workflow",
       "production_target": "agent-workflow",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "status": "experimental",
       "visibility": "public"
     },
     {
       "id": "write-good-goal",
       "display_name": "Write Good Goal",
-      "description": "Write concise, feasible agent goals with auditable done criteria, follow-up gates, and bounded iteration.",
+      "description": "Write paste-ready coding-agent goals with achievable Done criteria, explicit boundaries, and honest follow-up or human gates.",
       "source": "skills/write-good-goal",
       "production_target": "write-good-goal",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "status": "stable",
       "visibility": "public"
     }
