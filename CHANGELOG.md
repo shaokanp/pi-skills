@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added Traditional Chinese and English guides for `explain` and
+  `write-good-goal`, including visual flows, worked examples, and boundaries.
 - Added Traditional Chinese and English Agent Workflow guides with architecture,
   lane, artifact, runner-boundary, and Swarm Card examples.
 - Replaced the event-range-dependent Gitleaks Action wrapper with the official
