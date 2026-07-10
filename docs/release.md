@@ -12,6 +12,25 @@ This runs structural skill validation, scans the current publishable tree,
 packages every registered skill under `dist/` with a SHA-256 checksum, and
 checks generated artifact metadata for private paths.
 
+For a non-mutating repository/session diagnostic, run:
+
+```bash
+bash scripts/doctor.sh
+```
+
+The portable mode works without local Ops files. Maintainers should run the
+stronger local check before local release or maintenance work:
+
+```bash
+bash scripts/doctor.sh --strict-local
+```
+
+Strict local mode requires the ignored local configuration with a target and
+private markers, active hooks, and a passing production diff. Run it at session
+start and after local release. An intentional source change will make the drift
+check fail until that accepted source is released. It does not install hooks or
+change local production. Gitleaks remains isolated to the public publish gate.
+
 ## 2. Configure Local Production
 
 Copy the example configuration and set the skills root used by the local agent
@@ -44,7 +63,27 @@ Confirm that each installed `SKILL.md` exists, production diffing passes, and
 bundled scripts run from the installed directory. Agent runtimes may require a
 new session before refreshed skill metadata appears in their skill catalog.
 
-## 5. Publish
+## 5. Version And Changelog Contract
+
+The registry is the source of each current skill version. Every registered
+`id`/`version` pair must have exactly one machine-readable marker in
+`CHANGELOG.md`:
+
+```markdown
+<!-- pi-skills:unreleased id=example version=0.1.0 -->
+<!-- pi-skills:release id=example version=0.1.0 -->
+```
+
+Use `unreleased` only under `## Unreleased`. When publishing a version, move
+the marker under the dated release heading and change it to `release`. Keep the
+corresponding human-readable release notes beside it. The validator rejects a
+missing, duplicate, malformed, or misplaced marker.
+
+Maintainers decide whether a behavioral change needs a version bump. The
+repository can validate declared versions and changelog records, but it cannot
+reliably infer semantic behavior changes from Git diffs.
+
+## 6. Publish
 
 ### Configure private markers
 

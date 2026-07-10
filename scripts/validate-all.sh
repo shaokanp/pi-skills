@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python3 "$ROOT/scripts/validate_public_tree.py" "$ROOT"
+python3 "$ROOT/scripts/validate-registry-changelog.py" "$ROOT"
 
 python3 - "$ROOT/registry.json" <<'PY'
 import json
@@ -39,6 +40,14 @@ for skill in skills:
         raise SystemExit(f"production_target must match id for {skill_id}")
     if not isinstance(skill.get("version"), str) or not version_pattern.fullmatch(skill["version"]):
         raise SystemExit(f"invalid version for {skill_id}: {skill.get('version')!r}")
+    if skill.get("status") not in {"stable", "experimental"}:
+        raise SystemExit(f"invalid status for {skill_id}: {skill.get('status')!r}")
+    if not isinstance(skill.get("display_name"), str) or not skill["display_name"].strip():
+        raise SystemExit(f"display_name is required for {skill_id}")
+    if not isinstance(skill.get("description"), str) or not skill["description"].strip():
+        raise SystemExit(f"description is required for {skill_id}")
+    if re.match(r"(?i)^\s*(?:todo|tbd|placeholder)(?:\s*:|\s*$)", skill["description"]):
+        raise SystemExit(f"description contains incomplete placeholder content for {skill_id}")
     if skill.get("visibility") != "public":
         raise SystemExit(f"public repository cannot include non-public skill {skill_id}")
 

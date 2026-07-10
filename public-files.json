@@ -14,22 +14,26 @@
     "public-files.json",
     "registry.json",
     "scripts/check-public.sh",
+    "scripts/doctor.sh",
     "scripts/diff-production.sh",
     "scripts/install-hooks.sh",
     "scripts/install-skill.sh",
     "scripts/package-all.sh",
     "scripts/package-skill.sh",
     "scripts/package_skill.py",
+    "scripts/new-skill.sh",
     "scripts/preflight.sh",
     "scripts/public_safety.py",
     "scripts/publish-preflight.sh",
     "scripts/release-local.sh",
     "scripts/scan-secrets.sh",
     "scripts/validate-all.sh",
+    "scripts/validate-registry-changelog.py",
     "scripts/validate-skill.sh",
     "scripts/validate_public_tree.py",
     "tests/test_package_public_files.py",
-    "tests/test_public_safety.py"
+    "tests/test_public_safety.py",
+    "tests/test_maintenance_harness.py"
   ],
   "allowed_prefixes": [
     "skills/"

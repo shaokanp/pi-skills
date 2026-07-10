@@ -8,10 +8,33 @@ clone.
 
 - Edit canonical skill source only under `skills/<skill-id>/`.
 - Register every public skill in `registry.json`.
+- Every registered skill must include `SKILL.md`, `README.md`, and
+  `README.en.md`. The guides must start with meaningful H1 headings and cannot
+  contain scaffold placeholders.
 - Do not add machine-specific paths, credentials, private workspace policy,
   runtime state, logs, or personal project metadata.
 - Do not maintain a second hand-edited public copy of a skill.
 - Keep generated archives under ignored `dist/`.
+
+## New Skills And Versions
+
+Start a new public skill with:
+
+```bash
+bash scripts/new-skill.sh <id>
+```
+
+The scaffold uses structured `registry.json` editing and adds an explicit
+`<!-- pi-skills:unreleased id=<id> version=<version> -->` marker. It is
+intentionally incomplete, so validation fails until all three skill documents
+are completed. The command never installs, releases, commits, or pushes.
+
+When a maintainer decides a behavior change deserves a version change, update
+the registry version and keep exactly one matching marker for that skill and
+version: either the current `unreleased` marker under `## Unreleased`, or a
+`release` marker under a dated release heading. Validation checks that contract
+but cannot determine semantic behavior changes from Git history; that decision
+remains a maintainer responsibility.
 
 ## Validate
 
@@ -27,6 +50,11 @@ Before committing:
 ```bash
 bash scripts/preflight.sh
 ```
+
+For a non-mutating session check, run `bash scripts/doctor.sh`. Local
+maintainers should also run `bash scripts/doctor.sh --strict-local` at session
+start and after local release; it requires local config, hooks, and production
+drift to be clean. Gitleaks remains part of the separate public publish gate.
 
 Before publishing:
 

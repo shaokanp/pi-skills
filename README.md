@@ -69,12 +69,31 @@ For a Claude Code skills directory, pass that directory explicitly as
 ## Develop
 
 1. Edit `skills/<skill-id>/`.
-2. Update `registry.json` and `CHANGELOG.md` when behavior or version changes.
-3. Follow `CONTRIBUTING.md` and run the complete preflight:
+2. Use `bash scripts/new-skill.sh <id>` for a new registered scaffold. It is
+   deliberately incomplete and cannot pass validation until all three skill
+   documents are completed.
+3. Update `registry.json` and `CHANGELOG.md` when behavior or version changes.
+   Each current skill version needs exactly one deterministic changelog marker:
+   an `unreleased` marker under `## Unreleased`, or a `release` marker under a
+   dated release heading. The validator cannot infer behavior changes from a
+   Git diff, so maintainers must make that version decision explicitly.
+4. Follow `CONTRIBUTING.md` and run the complete preflight:
 
 ```bash
 bash scripts/preflight.sh
 ```
+
+For a quick session check that never installs, releases, commits, pushes, or
+changes production, run:
+
+```bash
+bash scripts/doctor.sh
+```
+
+Local maintainers can require the ignored local configuration, active hooks,
+and a passing source-to-production comparison with
+`bash scripts/doctor.sh --strict-local`. Run it at session start and again after
+local release; use `publish-preflight.sh` for the Gitleaks-backed publish gate.
 
 The preflight validates every registered skill, scans the publishable tree for
 private paths and common secret formats, builds release archives under `dist/`,

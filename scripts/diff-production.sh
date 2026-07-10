@@ -90,7 +90,7 @@ diff_one() {
     return 1
   fi
 
-  diff_output="$(rsync -anic --delete --delete-excluded --omit-dir-times \
+  diff_output="$(rsync -anic --delete --omit-dir-times \
     --exclude ".DS_Store" \
     --exclude "__pycache__" \
     --exclude "*.pyc" \

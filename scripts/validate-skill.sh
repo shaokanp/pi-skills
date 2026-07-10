@@ -51,6 +51,11 @@ from pathlib import Path
 path = Path(sys.argv[1])
 expected = sys.argv[2]
 text = path.read_text(encoding="utf-8")
+placeholder = re.compile(
+    r"(?im)pi-skills:scaffold-incomplete|"
+    r"^\s*(?:todo|tbd)(?:\s*:|\s*$)|"
+    r"\[\s*(?:todo|tbd)[^\]]*\]"
+)
 match = re.match(r"^---\n(.*?)\n---\n", text, re.S)
 if not match:
     raise SystemExit("SKILL.md must start with YAML frontmatter")
@@ -66,9 +71,35 @@ if name != expected:
     raise SystemExit(f"frontmatter name mismatch: expected {expected!r}, got {name!r}")
 if not description_seen:
     raise SystemExit("frontmatter description is required")
-if "# " not in text:
+if placeholder.search(text):
+    raise SystemExit("SKILL.md contains incomplete placeholder content")
+if not re.search(r"(?m)^# \S.+$", text):
     raise SystemExit("SKILL.md must include a top-level heading")
 PY
+
+for guide in "$SKILL_DIR/README.md" "$SKILL_DIR/README.en.md"; do
+  python3 - "$guide" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.is_file():
+    raise SystemExit(f"missing required skill guide: {path.name}")
+text = path.read_text(encoding="utf-8")
+lines = text.splitlines()
+first_content = next((line for line in lines if line.strip()), "")
+if not re.fullmatch(r"# \S.+", first_content):
+    raise SystemExit(f"{path.name} must start with a non-empty top-level heading")
+if re.search(
+    r"(?im)pi-skills:scaffold-incomplete|"
+    r"^\s*(?:todo|tbd)(?:\s*:|\s*$)|"
+    r"\[\s*(?:todo|tbd)[^\]]*\]",
+    text,
+):
+    raise SystemExit(f"{path.name} contains incomplete placeholder content")
+PY
+done
 
 LOCAL_CONFIG="${PI_SKILLS_LOCAL_CONFIG:-$ROOT/.pi-skills.local.json}"
 VALIDATOR="${PI_SKILLS_VALIDATOR:-}"
