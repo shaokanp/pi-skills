@@ -2,10 +2,14 @@
 
 ## Unreleased
 
+- Replaced the event-range-dependent Gitleaks Action wrapper with the official
+  versioned container and an explicit full-`HEAD` history scan.
 - Replaced the fixed-width Swarm Card phase grid with a deterministic,
   CJK-safe per-agent Markdown left rail.
 - Removed executor-type display symbols, placed explicit status text beside
-  every status symbol, and moved model/effort into italic parentheses.
+  every status symbol, and reduced italic agent metadata to the model name.
+- Kept the locked reasoning effort in durable routing evidence while hiding
+  `high`, `xhigh`, and inheritance provenance from the Swarm Card.
 - Added automatic card scaffolding, exact-token projection, render-hash
   deduplication for event-only updates, structural validation, and regressions.
 - Replaced self-declared workflow token totals with exact token-usage v2

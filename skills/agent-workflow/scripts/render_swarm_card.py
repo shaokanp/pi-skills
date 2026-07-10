@@ -264,10 +264,6 @@ def _model_parts(agent: dict[str, Any]) -> list[str]:
         route = routing.get("planned_route")
     if isinstance(route, dict) and isinstance(route.get("model"), str):
         parts = [_friendly_model(route["model"])]
-        if isinstance(route.get("effort"), str) and route["effort"].strip():
-            parts.append(route["effort"])
-        if routing.get("effort_source") == "user_session":
-            parts.append("inherited")
     else:
         model = agent.get("model")
         if isinstance(model, str) and model.strip():
@@ -275,9 +271,6 @@ def _model_parts(agent: dict[str, Any]) -> list[str]:
         elif isinstance(model, dict):
             display_name = model.get("display_name") or model.get("model") or model.get("id")
             parts = [_friendly_model(display_name)] if isinstance(display_name, str) else []
-            effort = model.get("effort")
-            if isinstance(effort, str) and effort.strip():
-                parts.append(effort)
         else:
             parts = ["model pending"]
 
@@ -548,9 +541,8 @@ def build_initial_card(
             "status_note": None,
             "model": {
                 "display_name": (
-                    "pending selection" if isinstance(lane.get("routing"), dict) else "inherited model"
+                    "pending selection" if isinstance(lane.get("routing"), dict) else "current model"
                 ),
-                "effort": None,
             },
         }
         if isinstance(lane.get("routing"), dict):

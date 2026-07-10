@@ -39,6 +39,20 @@ def lane(lane_id: str, lane_name: str, model: str, effort: str) -> dict[str, Any
 
 
 class SwarmCardTests(unittest.TestCase):
+    def test_model_display_hides_effort_and_inheritance(self) -> None:
+        routed_agent = {
+            "routing": {
+                "planned_route": {"model": "gpt-5.6-terra", "effort": "high"},
+                "effort_source": "user_session",
+            }
+        }
+        fallback_agent = {
+            "model": {"display_name": "gpt-5.6-sol", "effort": "xhigh"}
+        }
+
+        self.assertEqual(["Terra"], render_swarm_card._model_parts(routed_agent))
+        self.assertEqual(["Sol"], render_swarm_card._model_parts(fallback_agent))
+
     def card(self) -> dict[str, Any]:
         card = render_swarm_card.build_initial_card(
             slug="validator-hardening",
@@ -75,21 +89,23 @@ class SwarmCardTests(unittest.TestCase):
             self.assertIn("> **Agent Workflow · RUNNING**", output)
             self.assertIn(r"修掉 validator false\-pass，直到沒有 P2\+ open risk。", output)
             self.assertIn(
-                "> ■ complete · `discover-01` · discover *(Terra · xhigh · inherited)*",
+                "> ■ complete · `discover-01` · discover *(Terra)*",
                 output,
             )
             self.assertIn(
-                "> ◐ running · `implement-01` · implement *(Terra · xhigh · inherited)*",
+                "> ◐ running · `implement-01` · implement *(Terra)*",
                 output,
             )
             self.assertIn(
-                "> △ waiting: review findings · `repair-01` · repair *(Terra · xhigh · inherited)*",
+                "> △ waiting: review findings · `repair-01` · repair *(Terra)*",
                 output,
             )
             self.assertIn(
-                "> □ not started · `verify-01` · verify *(Sol · xhigh · inherited)*",
+                "> □ not started · `verify-01` · verify *(Sol)*",
                 output,
             )
+            self.assertNotIn("xhigh", output)
+            self.assertNotIn("inherited", output)
             self.assertNotIn("◆", output)
             self.assertNotIn("◇", output)
             self.assertNotIn("●", output)
@@ -207,7 +223,7 @@ class SwarmCardTests(unittest.TestCase):
             self.assertIn("Agent Workflow · RUNNING", emitted.stdout)
             self.assertIn("由 authoritative artifacts 更新。", emitted.stdout)
             self.assertIn(
-                "■ complete · `implement-01` · implement *(Sol · xhigh · inherited)*",
+                "■ complete · `implement-01` · implement *(Sol)*",
                 emitted.stdout,
             )
             persisted = json.loads(
@@ -295,7 +311,7 @@ class SwarmCardTests(unittest.TestCase):
             card,
             card_path=Path("swarm-card.json"),
         )
-        self.assertIn("*(inherited model · simulated)*", output)
+        self.assertIn("*(current model · simulated)*", output)
         self.assertNotIn("◇", output)
 
     def test_new_workflow_scaffolds_option_a_card(self) -> None:

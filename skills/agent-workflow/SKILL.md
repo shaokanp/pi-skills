@@ -58,7 +58,7 @@ Availability, identities, attempts, and actual routes are lead-recorded evidence
 
 ### Swarm Card Display
 
-For native or multi-agent-shaped workflows, emit the CJK-safe Markdown left-rail card before dispatch and only on meaningful state transitions. Keep explicit status text beside every symbol, model/effort in parentheses, and simulated or Lead ownership honest. Read `Swarm Card Display State` in `references/workflow-artifacts.md`; the card is display state, never runner evidence.
+For native or multi-agent-shaped workflows, emit the CJK-safe Markdown left-rail card before dispatch and only on meaningful state transitions. Keep explicit status text beside every symbol, show only the model in parentheses, and keep simulated or Lead ownership honest. Reasoning effort remains in durable routing evidence but is intentionally hidden from the card. Read `Swarm Card Display State` in `references/workflow-artifacts.md`; the card is display state, never runner evidence.
 
 ## Phase 0 - Sync Context
 

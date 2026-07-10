@@ -246,8 +246,7 @@ Use it when the lead needs stable, re-renderable card state across rounds:
           "status_note": null,
           "write_scope": "read-only",
           "model": {
-            "display_name": "pending selection",
-            "effort": null
+            "display_name": "pending selection"
           },
           "routing": {
             "packet_id": "packet-discover-01",
@@ -288,7 +287,9 @@ Render cards with `scripts/render_swarm_card.py`. It uses Markdown blockquotes
 as the left rail and one agent per line, so Chinese text, renderer font fallback,
 and mixed-width status symbols never need a calculated right edge. Every symbol
 is immediately followed by a status label. Executor kind remains durable JSON
-metadata but has no symbol; model and inherited effort appear in italic parentheses.
+metadata but has no symbol; only the model appears in italic parentheses. The
+locked reasoning effort remains in routing and attempt evidence but is hidden
+from the card.
 Before rendering, the helper projects workflow status and round from
 `state.json`, goal and planned route from `orchestration.json`, terminal route
 from `runner-evidence.json`, and completed/blocked/failed status from lane
@@ -304,17 +305,17 @@ authoritative.
 > Fix validator false-pass paths until no P2+ risk remains.
 >
 > **Discover**
-> ■ complete · `discover-01` · current-state explorer *(Terra · xhigh · inherited)*
+> ■ complete · `discover-01` · current-state explorer *(Terra)*
 >
 > **Implement & Repair**
-> ◐ running · `implement-01` · bounded writer *(Terra · xhigh · inherited)*
-> △ waiting: review findings · `repair-01` · targeted repair *(Terra · xhigh · inherited)*
+> ◐ running · `implement-01` · bounded writer *(Terra)*
+> △ waiting: review findings · `repair-01` · targeted repair *(Terra)*
 >
 > **Review & Challenge**
-> □ not started · `review-01` · independent review *(Sol · xhigh · inherited)*
+> □ not started · `review-01` · independent review *(Sol)*
 >
 > **Verify**
-> □ not started · `verify-01` · evidence gate *(Sol · xhigh · inherited)*
+> □ not started · `verify-01` · evidence gate *(Sol)*
 >
 > **Gate** Pending · Open P2+: 0
 ```
