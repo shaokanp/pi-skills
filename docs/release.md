@@ -78,9 +78,10 @@ bash scripts/install-hooks.sh
   working-tree scan could miss.
 - `pre-push` requires a clean tree, runs the complete package preflight, and
   scans the exact commits and tags from Git's pre-push ref stream.
-- `publish-preflight` also runs Gitleaks over the worktree and local Git refs.
-  The dependency is isolated to public publishing; local production release
-  does not require it.
+- `publish-preflight` also runs Gitleaks over an archive of the tracked `HEAD`
+  distribution and local Git refs. Ignored local workspaces are not part of the
+  public surface. The dependency is isolated to public publishing; local
+  production release does not require it.
 
 ### Run the publish gate manually
 

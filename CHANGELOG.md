@@ -7,6 +7,9 @@
   receipts, and budgets by default instead of requiring an opt-in flag.
 - Kept manual simulation unchanged, retained `off` as an explicit compatibility
   rollback, and continued validating existing `explicit_opt_in` workspaces.
+- Scoped the Gitleaks directory scan to an archive of tracked `HEAD`, preventing
+  ignored local agent worktrees from falsely blocking an otherwise clean public
+  release while retaining complete tracked-tree and Git-history coverage.
 - Reworked all three skill descriptions around distinct trigger branches and
   explicit routing boundaries between explanation, goal drafting, multi-agent
   execution, and ordinary direct work.

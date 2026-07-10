@@ -119,9 +119,10 @@ bash scripts/publish-preflight.sh
 The pre-commit hook scans the staged Git index. The pre-push hook reads Git's
 ref update stream and scans the commits and annotated tags actually being sent;
 on the first push to an empty remote, that means the complete reachable history.
-The strict publish gate also runs Gitleaks against the worktree and full local
-history. Gitleaks is intentionally required only for public publishing, not for
-internal `release-local.sh` use.
+The strict publish gate also runs Gitleaks against an archive of the tracked
+`HEAD` distribution and full local history. Ignored local workspaces are outside
+the public surface. Gitleaks is intentionally required only for public
+publishing, not for internal `release-local.sh` use.
 
 History failures must be resolved before publishing. Adding a cleanup commit
 does not remove sensitive content from older commits. The local denylist remains
