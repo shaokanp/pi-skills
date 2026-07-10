@@ -160,17 +160,18 @@ exhaustion, repair affinity, and verifier independence without invoking an LLM.
 Prompt:
 
 ```text
-Use an agent team workflow and explicitly route Codex subagents with the portable quality-floor policy.
+Use an agent team workflow and explicitly route Codex subagents with the portable responsibility-routing policy.
 ```
 
 Expected behavior:
 
-- Enable routing only with `--model-routing codex`, `--runner-mode codex_builtin_subagents`, a lead-provided `--runtime-capabilities` JSON inventory, and explicit fresh `--runner-capability-evidence`. The inventory file alone does not certify availability. Default scaffolds contain no routing block or routing files.
+- Enable routing only with `--model-routing codex`, `--runner-mode codex_builtin_subagents`, a lead-provided `--runtime-capabilities` JSON inventory, explicit `--reasoning-effort`, and fresh `--runner-capability-evidence`. The inventory file alone does not certify availability. Default scaffolds contain no routing block or routing files.
 - Persist `routing-policy.json` and `runtime-capabilities.json` with canonical digests, and copy both snapshot IDs/digests into every planned lane decision.
 - Classify all packet facts, compute the ordered first-match decision, bind every required verifier and author lane, confirm planned verifier routes meet their floors, replace `draft`, and pass `--mode planned` before dispatch.
-- Keep Terra/high as the automatic floor. Automatic initial routes may be Terra/high, Terra/xhigh, Sol/high, or Sol/xhigh. Sol/max is automatic only as an evidenced escalation from Sol/xhigh; Luna, low, medium, ultra, and unclassified models are never automatic.
-- A reasoned lead/user request may raise the route. A request below the computed minimum or unavailable high-guard route becomes a human gate.
-- Keep one runner record per round/lane and append attempts. Retry keeps the route after context/tool failure; fallback follows an unavailable/route_unavailable parent; escalation advances one route after evidenced insufficient reasoning bound to the preceding failed attempt. Route-changing evidence refs must be safe, existing, substantive workspace artifacts. Never rewrite the planned selection, digest, or earlier attempts.
+- Snapshot one user-session reasoning effort and require every selected, dispatched, and actual route to preserve it. The router never chooses effort.
+- Route Sol for thinking roles, material ambiguity, cross-boundary work, production or hard-to-reverse risk, weak verifiability, novelty, and judgment claims. Route Terra only for the bounded default execution case.
+- A reasoned lead/user request may raise Terra to Sol at the inherited effort. A request to lower Sol or change effort becomes a human gate or validation failure.
+- Keep one runner record per round/lane and append attempts. Retry keeps model and effort after context/tool failure; fallback or escalation may only change Terra to Sol while preserving effort. Route-changing evidence refs must be safe, existing, substantive workspace artifacts. Never rewrite the planned selection, digest, or earlier attempts.
 - In final mode, every routed lane ends with a completed terminal attempt. Every required verifier completes with a pass gate, meets the minimum terminal actual route, has a different recorded identity from every named author, and binds every required evidence name to a substantive passing check.
 - Label capability, identity, lifecycle, attempt, and actual-route evidence as lead-recorded. Do not call it runtime-attested or independently verified.
 - Project routing into the optional Swarm Card from orchestration plus runner evidence. The card cannot become routing truth or execution evidence.
@@ -270,11 +271,11 @@ Expected behavior:
 - Routing checks activate only when `orchestration.model_routing.enabled` is exactly `true`; missing/disabled routing preserves legacy, manual, Claude Code, and prior v1 runner records without attempts.
 - Routed `scaffold` accepts draft decisions, `planned` rejects drafts/human gates before dispatch, and `executed`/`final` require attempts for every dispatched routed lane.
 - Routed snapshots, references, planned decisions, and attempt decision references reject canonical digest drift.
-- Routed v1 rejects semantically weakened policies even when an attacker recomputes a valid content digest.
+- Routed v2 rejects semantically weakened policies even when an attacker recomputes a valid content digest.
 - Capability observations require valid RFC3339 timestamps, and planned mode requires an explicit fresh recheck bound to the capability snapshot digest.
-- Ordered route policy rejects prose predicates, duplicate priorities, missing defaults, Luna, medium/ultra/low automatic routes, unclassified automatic models, unknown facts, aliases such as `novelty: mixed`, and missing packet facts.
-- Automatic capability fallback cannot select Sol/max as an initial attempt. Sol/max requires the allowed evidenced escalation transition.
-- Attempt validation rejects changed-route retries, excess retries, fallback after the wrong failure/outcome, unsafe or missing route-change evidence, unbound escalation evidence, excess route changes, silent actual-route substitution, terminal pointer drift, post-completion attempts, and planned digest drift.
+- Responsibility routing rejects prose predicates, duplicate priorities, missing defaults, Luna, effort-bearing policy effects, unknown facts, aliases such as `novelty: mixed`, and missing packet facts.
+- The capability snapshot requires one locked `user_session` effort. Attempt, override, orchestration, and actual-route drift from that effort fail closed.
+- Attempt validation rejects changed-model retries, excess retries, fallback after the wrong failure/outcome, changed effort, unsafe or missing model-change evidence, unbound escalation evidence, excess model changes, silent actual-route substitution, terminal pointer drift, post-completion attempts, and planned digest drift.
 - Planned verifier-floor validation rejects missing bindings or below-floor verifier plans. Final validation also rejects non-completed terminal attempts, a missing/non-pass verifier, identity overlap with any named author, or missing substantive named checks, and applies the decision's missing-evidence action.
 - Final Swarm projection validation rejects stale planned/actual routes, status, or attempt counts; removing the optional card does not weaken routing validation.
 
@@ -342,7 +343,7 @@ Expected behavior:
 - Final mode rejects standalone or alternate-auxiliary passive output/result/response overclaims anywhere in a lead-recorded final report, such as `output had been created` or `response would be generated`, while preserving `output_path` field references.
 - Final mode rejects plural and adverb-split passive output/result/response overclaims anywhere in a lead-recorded final report, such as `outputs were created`, `output has already been created`, and `response did actually get generated`, while preserving `output_path` field references.
 - Final mode rejects `tool_event_verified` runner evidence in v1 unless a future external runtime attestation verifier is implemented. A self-consistent lead-authored event log with `trusted_capture`, `capture_source`, `transcript_hash`, `event_hash_chain`, or matching spawn/wait/close records must still fail; use `lead_recorded` for current native subagent lifecycle ledgers.
-- Swarm Card v2 renders one agent per phase-grouped Markdown line, keeps every status symbol adjacent to its text label, displays model/effort in italic parentheses, and rejects executor-type legend symbols.
+- Swarm Card v2 renders one agent per phase-grouped Markdown line, keeps every status symbol adjacent to its text label, displays model plus inherited effort in italic parentheses, and rejects executor-type legend symbols.
 - `render_swarm_card.py --emit` records the visible render hash, suppresses unchanged redraws, and emits again after a material status or gate transition.
 - Running cards report `Tokens: measuring`; only a completed exact token-usage v2 ledger may render a numeric total.
 - Final mode rejects pass-like non-current rounds whose lane outputs still have non-pass gate decisions.

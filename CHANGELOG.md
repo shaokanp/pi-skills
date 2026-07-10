@@ -29,8 +29,12 @@
 - Added opt-in Codex model routing with persisted policy and capability
   snapshots, immutable per-attempt route evidence, and claim-derived verifier
   floors.
-- Set `gpt-5.6-terra/high` as the minimum automatic route, reserved Sol and
-  xhigh for stronger lanes, and required evidenced escalation for Sol/max.
+- Replaced model-plus-effort routing with responsibility routing: Sol handles
+  thinking, judgment, ambiguity, and high risk; Terra handles bounded execution.
+- Locked one user-session reasoning effort per workflow and required every
+  planned, dispatched, fallback, escalation, and actual route to inherit it.
+- Added responsibility-routing policy/capability/decision schema v2; active v1
+  routed runs remain pinned instead of being silently reinterpreted.
 - Added fail-closed planned and final validation for unavailable routes,
   identity independence, evidence bindings, fallback, retry, and escalation.
 - Moved detailed runtime-contract procedures into the artifact reference so the

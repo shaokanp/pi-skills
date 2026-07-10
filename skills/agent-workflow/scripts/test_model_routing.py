@@ -20,7 +20,7 @@ import verify_workflow
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-POLICY_PATH = SKILL_ROOT / "assets" / "model-routing-policy.v1.json"
+POLICY_PATH = SKILL_ROOT / "assets" / "model-routing-policy.v2.json"
 POSITIVE_FIXTURE_PATH = SKILL_ROOT / "fixtures" / "model-routing" / "positive.json"
 NEGATIVE_FIXTURE_PATH = SKILL_ROOT / "fixtures" / "model-routing" / "negative.json"
 NEW_WORKFLOW = SKILL_ROOT / "scripts" / "new_workflow.py"
@@ -87,7 +87,7 @@ class ModelRoutingTests(unittest.TestCase):
         for case in self.positive["route_cases"]:
             with self.subTest(case=case["name"]):
                 floor = model_routing.evaluate_verifier_floor(
-                    self.policy, case["facts"]
+                    self.policy, self.capabilities, case["facts"]
                 )
                 verifier_bindings = (
                     {
@@ -119,7 +119,7 @@ class ModelRoutingTests(unittest.TestCase):
             "duplicate_priority": self._policy_duplicate_priority,
             "missing_default": self._policy_missing_default,
             "luna_route": self._policy_luna_route,
-            "medium_route": self._policy_medium_route,
+            "effort_in_policy": self._policy_effort_in_policy,
             "remove_approval_rule": self._policy_remove_approval_rule,
             "remove_high_consequence_rule": self._policy_remove_high_consequence_rule,
             "remove_external_rule": self._policy_remove_external_rule,
@@ -137,9 +137,8 @@ class ModelRoutingTests(unittest.TestCase):
                     model_routing.validate_policy_snapshot(mutated)
 
         capability_mutators = {
-            "luna_automatic": self._capability_luna_automatic,
-            "unclassified_automatic": self._capability_unclassified_automatic,
-            "unsupported_automatic_effort": self._capability_unsupported_effort,
+            "unsupported_inherited_effort": self._capability_unsupported_inherited_effort,
+            "unlocked_inherited_effort": self._capability_unlocked_inherited_effort,
             "malformed_observed_at": self._capability_malformed_observed_at,
             "digest_mismatch": self._digest_mismatch,
         }
@@ -156,7 +155,7 @@ class ModelRoutingTests(unittest.TestCase):
             "missing_blast_radius": self._fact_missing_blast_radius,
             "unknown_fact": self._fact_unknown,
         }
-        base_facts = self.route_cases["terra_high_default"]["facts"]
+        base_facts = self.route_cases["terra_bounded_execution"]["facts"]
         for case in self.negative["fact_mutations"]:
             with self.subTest(category="facts", case=case["name"]):
                 mutated = fact_mutators[case["mutation"]](copy.deepcopy(base_facts))
@@ -208,20 +207,43 @@ class ModelRoutingTests(unittest.TestCase):
                             evidence_root=evidence_root,
                         )
 
-    def test_automatic_routing_never_selects_sol_max_initially(self) -> None:
+    def test_routing_inherits_effort_without_selecting_it(self) -> None:
         capabilities = copy.deepcopy(self.capabilities)
-        for item in capabilities["models"]:
-            item["automatic_efforts"] = ["max"] if item["id"] == "gpt-5.6-sol" else []
+        capabilities["reasoning_effort"]["value"] = "max"
         refresh_content_digest(capabilities)
         capabilities = model_routing.validate_capability_snapshot(capabilities)
         result = model_routing.evaluate_route(
             self.policy,
             capabilities,
-            self.route_cases["terra_high_default"]["facts"],
+            self.route_cases["terra_bounded_execution"]["facts"],
             AUTOMATIC_REQUEST,
         )
-        self.assertEqual("human_gate", result["status"])
-        self.assertIsNone(result["selected"])
+        self.assertEqual("planned", result["status"])
+        self.assertEqual(
+            {"model": "gpt-5.6-terra", "effort": "max"},
+            result["selected"],
+        )
+
+    def test_workflow_persists_one_locked_user_session_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow = self._scaffold(
+                Path(temp),
+                "locked-user-effort",
+                "codex_builtin_subagents",
+                lanes="implement,verify",
+                routing=True,
+            )
+            orchestration = load_json(workflow / "orchestration.json")
+            capabilities = load_json(workflow / "runtime-capabilities.json")
+            expected = {"source": "user_session", "value": "xhigh", "locked": True}
+            self.assertEqual(expected, orchestration["model_routing"]["reasoning_effort"])
+            self.assertEqual(expected, capabilities["reasoning_effort"])
+
+            orchestration["model_routing"]["reasoning_effort"]["value"] = "high"
+            write_json(workflow / "orchestration.json", orchestration)
+            result = self.verify(workflow, "scaffold")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("must match the locked user-session effort", result.stdout)
 
     def test_capability_recheck_is_explicit_bound_and_fresh(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -266,7 +288,7 @@ class ModelRoutingTests(unittest.TestCase):
             self._materialize_strict_contract(workflow)
             self._plan_routed_lanes(
                 workflow,
-                {"implement-01": self.route_cases["terra_high_default"]["facts"]},
+                {"implement-01": self.route_cases["terra_bounded_execution"]["facts"]},
             )
             result = self.verify(workflow, "planned")
             self.assertNotEqual(0, result.returncode)
@@ -312,7 +334,7 @@ class ModelRoutingTests(unittest.TestCase):
                 fallback_decision,
                 ordinal=2,
                 transition="fallback",
-                route={"model": "gpt-5.6-terra", "effort": "xhigh"},
+                route={"model": "gpt-5.6-sol", "effort": "xhigh"},
                 outcome="completed",
                 parent_attempt_id=unavailable["attempt_id"],
             )
@@ -324,16 +346,7 @@ class ModelRoutingTests(unittest.TestCase):
                 evidence_root=evidence_root,
             )
 
-            escalation_decision = model_routing.build_planned_decision(
-                self.policy,
-                self.capabilities,
-                packet_id="packet-valid-escalation",
-                decision_id="decision-valid-escalation",
-                facts=self.route_cases["sol_xhigh_novel_cross_boundary"]["facts"],
-                verifier_lane_ids=["verify-01"],
-                independent_of_lane_ids=["plan-01"],
-                required_evidence=["routing contract"],
-            )
+            escalation_decision = self._routine_decision("valid-escalation")
             insufficient = self._attempt(
                 escalation_decision,
                 ordinal=1,
@@ -349,7 +362,7 @@ class ModelRoutingTests(unittest.TestCase):
                 escalation_decision,
                 ordinal=2,
                 transition="escalation",
-                route={"model": "gpt-5.6-sol", "effort": "max"},
+                route={"model": "gpt-5.6-sol", "effort": "xhigh"},
                 outcome="completed",
                 parent_attempt_id=insufficient["attempt_id"],
             )
@@ -357,7 +370,7 @@ class ModelRoutingTests(unittest.TestCase):
                 self._record(
                     escalation_decision,
                     [insufficient, escalated],
-                    lane_id="plan-01",
+                    lane_id="implement-01",
                 ),
                 escalation_decision,
                 self.policy,
@@ -381,7 +394,7 @@ class ModelRoutingTests(unittest.TestCase):
             )
             base_request = {
                 "source": "lead",
-                "requested_route": {"model": "gpt-5.6-terra", "effort": "xhigh"},
+                "requested_route": {"model": "gpt-5.6-sol", "effort": "xhigh"},
                 "reason": "Raise the route for the evidenced shared review requirement.",
                 "evidence_refs": ["orchestration.json#route_reason"],
             }
@@ -390,7 +403,7 @@ class ModelRoutingTests(unittest.TestCase):
                 self.capabilities,
                 packet_id="packet-safe-override",
                 decision_id="decision-safe-override",
-                facts=self.route_cases["terra_high_default"]["facts"],
+                facts=self.route_cases["terra_bounded_execution"]["facts"],
                 request=base_request,
             )
             model_routing.validate_planned_decision(
@@ -399,6 +412,21 @@ class ModelRoutingTests(unittest.TestCase):
                 self.capabilities,
                 evidence_root=evidence_root,
             )
+
+            changed_effort = copy.deepcopy(base_request)
+            changed_effort["requested_route"]["effort"] = "high"
+            with self.assertRaisesRegex(
+                model_routing.RoutingError,
+                "cannot override the workflow-inherited reasoning effort",
+            ):
+                model_routing.build_planned_decision(
+                    self.policy,
+                    self.capabilities,
+                    packet_id="packet-effort-override",
+                    decision_id="decision-effort-override",
+                    facts=self.route_cases["terra_bounded_execution"]["facts"],
+                    request=changed_effort,
+                )
 
             for unsafe_ref in ("../../private/secret", "/tmp/private-secret"):
                 request = copy.deepcopy(base_request)
@@ -411,7 +439,7 @@ class ModelRoutingTests(unittest.TestCase):
                         self.capabilities,
                         packet_id="packet-unsafe-override",
                         decision_id="decision-unsafe-override",
-                        facts=self.route_cases["terra_high_default"]["facts"],
+                        facts=self.route_cases["terra_bounded_execution"]["facts"],
                         request=request,
                     )
 
@@ -427,7 +455,7 @@ class ModelRoutingTests(unittest.TestCase):
                     self.capabilities,
                     packet_id=f"packet-{Path(bad_ref).stem}",
                     decision_id=f"decision-{Path(bad_ref).stem}",
-                    facts=self.route_cases["terra_high_default"]["facts"],
+                    facts=self.route_cases["terra_bounded_execution"]["facts"],
                     request=request,
                 )
                 with self.subTest(ref=bad_ref), self.assertRaises(
@@ -522,7 +550,7 @@ class ModelRoutingTests(unittest.TestCase):
 
             decisions = self._plan_routed_lanes(
                 workflow,
-                {"implement-01": self.route_cases["terra_high_default"]["facts"]},
+                {"implement-01": self.route_cases["terra_bounded_execution"]["facts"]},
             )
             self.assertVerifierPasses(workflow, "planned")
 
@@ -671,9 +699,9 @@ class ModelRoutingTests(unittest.TestCase):
             )
             self._materialize_strict_contract(workflow)
             facts = {
-                "implement-01": self.route_cases["sol_high_high_consequence"]["facts"],
+                "implement-01": self.route_cases["sol_high_consequence"]["facts"],
                 "verify-01": {
-                    **self.route_cases["terra_high_default"]["facts"],
+                    **self.route_cases["terra_bounded_execution"]["facts"],
                     "role": "verify",
                 },
             }
@@ -701,9 +729,7 @@ class ModelRoutingTests(unittest.TestCase):
             self.assertIn("required_evidence is required before dispatch", missing_evidence.stdout)
 
             self._plan_routed_lanes(workflow, facts, verifier_bindings=bindings)
-            below_floor = self.verify(workflow, "planned")
-            self.assertNotEqual(0, below_floor.returncode)
-            self.assertIn("planned verifier verify-01 is below verifier floor", below_floor.stdout)
+            self.assertVerifierPasses(workflow, "planned")
 
             bad_bindings = copy.deepcopy(bindings)
             bad_bindings["implement-01"]["independent_of_lane_ids"].append("missing-author")
@@ -716,7 +742,6 @@ class ModelRoutingTests(unittest.TestCase):
             self._plan_routed_lanes(
                 workflow,
                 facts,
-                requests={"verify-01": raised_request},
                 verifier_bindings=bad_bindings,
             )
             missing_author = self.verify(workflow, "planned")
@@ -742,13 +767,13 @@ class ModelRoutingTests(unittest.TestCase):
             )
             self._materialize_strict_contract(workflow)
             facts = {
-                "implement-01": self.route_cases["sol_high_high_consequence"]["facts"],
+                "implement-01": self.route_cases["sol_high_consequence"]["facts"],
                 "repair-01": {
-                    **self.route_cases["terra_high_default"]["facts"],
+                    **self.route_cases["terra_bounded_execution"]["facts"],
                     "role": "repair",
                 },
                 "verify-01": {
-                    **self.route_cases["terra_high_default"]["facts"],
+                    **self.route_cases["terra_bounded_execution"]["facts"],
                     "role": "verify",
                 },
             }
@@ -852,9 +877,9 @@ class ModelRoutingTests(unittest.TestCase):
             decisions = self._plan_routed_lanes(
                 workflow,
                 {
-                    "implement-01": self.route_cases["sol_high_high_consequence"]["facts"],
+                    "implement-01": self.route_cases["sol_high_consequence"]["facts"],
                     "verify-01": {
-                        **self.route_cases["terra_high_default"]["facts"],
+                        **self.route_cases["terra_bounded_execution"]["facts"],
                         "role": "verify",
                     },
                 },
@@ -931,7 +956,6 @@ class ModelRoutingTests(unittest.TestCase):
                 "verifier verify-01 must complete with a pass gate",
                 final_failure.stdout,
             )
-            self.assertIn("is below verifier floor", final_failure.stdout)
             self.assertIn(
                 "missing passing substantive checks: routing contract",
                 final_failure.stdout,
@@ -950,9 +974,9 @@ class ModelRoutingTests(unittest.TestCase):
             decisions = self._plan_routed_lanes(
                 workflow,
                 {
-                    "implement-01": self.route_cases["sol_high_high_consequence"]["facts"],
+                    "implement-01": self.route_cases["sol_high_consequence"]["facts"],
                     "verify-01": {
-                        **self.route_cases["terra_high_default"]["facts"],
+                        **self.route_cases["terra_bounded_execution"]["facts"],
                         "role": "verify",
                     },
                 },
@@ -1060,14 +1084,11 @@ class ModelRoutingTests(unittest.TestCase):
 
     @staticmethod
     def _policy_luna_route(value: dict[str, Any]) -> dict[str, Any]:
-        value["decision_rules"][-1]["effect"] = {
-            "model": "gpt-5.6-luna",
-            "effort": "high",
-        }
+        value["decision_rules"][-1]["effect"] = {"model": "gpt-5.6-luna"}
         return refresh_content_digest(value)
 
     @staticmethod
-    def _policy_medium_route(value: dict[str, Any]) -> dict[str, Any]:
+    def _policy_effort_in_policy(value: dict[str, Any]) -> dict[str, Any]:
         value["decision_rules"][-1]["effect"] = {
             "model": "gpt-5.6-terra",
             "effort": "medium",
@@ -1092,13 +1113,13 @@ class ModelRoutingTests(unittest.TestCase):
         cls, value: dict[str, Any]
     ) -> dict[str, Any]:
         return cls._remove_policy_rule(
-            value, "decision_rules", "route.sol_high.high_consequence"
+            value, "decision_rules", "route.sol.judgment_claim"
         )
 
     @classmethod
     def _policy_remove_external_rule(cls, value: dict[str, Any]) -> dict[str, Any]:
         return cls._remove_policy_rule(
-            value, "decision_rules", "route.sol_high.external_production"
+            value, "decision_rules", "route.sol.external_production"
         )
 
     @classmethod
@@ -1106,13 +1127,13 @@ class ModelRoutingTests(unittest.TestCase):
         cls, value: dict[str, Any]
     ) -> dict[str, Any]:
         return cls._remove_policy_rule(
-            value, "decision_rules", "route.sol_high.hard_reversal"
+            value, "decision_rules", "route.sol.hard_reversal"
         )
 
     @classmethod
     def _policy_remove_judgment_rule(cls, value: dict[str, Any]) -> dict[str, Any]:
         return cls._remove_policy_rule(
-            value, "decision_rules", "route.sol_high.judgment_only"
+            value, "decision_rules", "route.sol.weak_verifiability"
         )
 
     @staticmethod
@@ -1122,7 +1143,7 @@ class ModelRoutingTests(unittest.TestCase):
 
     @staticmethod
     def _policy_change_id(value: dict[str, Any]) -> dict[str, Any]:
-        value["policy_id"] = "quality-floor-codex-v1-weakened"
+        value["policy_id"] = "responsibility-routing-codex-v2-weakened"
         return refresh_content_digest(value)
 
     @staticmethod
@@ -1136,24 +1157,13 @@ class ModelRoutingTests(unittest.TestCase):
         return value
 
     @staticmethod
-    def _capability_luna_automatic(value: dict[str, Any]) -> dict[str, Any]:
-        next(item for item in value["models"] if item["id"] == "gpt-5.6-luna")[
-            "automatic_efforts"
-        ] = ["high"]
+    def _capability_unsupported_inherited_effort(value: dict[str, Any]) -> dict[str, Any]:
+        value["reasoning_effort"]["value"] = "unsupported"
         return refresh_content_digest(value)
 
     @staticmethod
-    def _capability_unclassified_automatic(value: dict[str, Any]) -> dict[str, Any]:
-        next(item for item in value["models"] if item["id"] == "gpt-5.5")[
-            "automatic_efforts"
-        ] = ["high"]
-        return refresh_content_digest(value)
-
-    @staticmethod
-    def _capability_unsupported_effort(value: dict[str, Any]) -> dict[str, Any]:
-        next(item for item in value["models"] if item["id"] == "gpt-5.6-terra")[
-            "automatic_efforts"
-        ].append("unsupported")
+    def _capability_unlocked_inherited_effort(value: dict[str, Any]) -> dict[str, Any]:
+        value["reasoning_effort"]["locked"] = False
         return refresh_content_digest(value)
 
     @staticmethod
@@ -1182,7 +1192,7 @@ class ModelRoutingTests(unittest.TestCase):
             self.capabilities,
             packet_id=f"packet-{suffix}",
             decision_id=f"decision-{suffix}",
-            facts=self.route_cases["terra_high_default"]["facts"],
+            facts=self.route_cases["terra_bounded_execution"]["facts"],
         )
 
     @staticmethod
@@ -1303,7 +1313,7 @@ class ModelRoutingTests(unittest.TestCase):
             decision,
             ordinal=2,
             transition="retry",
-            route={"model": "gpt-5.6-terra", "effort": "xhigh"},
+            route={"model": "gpt-5.6-sol", "effort": "xhigh"},
             outcome="completed",
             parent_attempt_id=first["attempt_id"],
         )
@@ -1350,7 +1360,7 @@ class ModelRoutingTests(unittest.TestCase):
             decision,
             ordinal=2,
             transition="fallback",
-            route={"model": "gpt-5.6-terra", "effort": "xhigh"},
+            route={"model": "gpt-5.6-sol", "effort": "xhigh"},
             outcome="completed",
             parent_attempt_id=first["attempt_id"],
         )
@@ -1384,7 +1394,7 @@ class ModelRoutingTests(unittest.TestCase):
             decision,
             ordinal=2,
             transition="escalation",
-            route={"model": "gpt-5.6-terra", "effort": "xhigh"},
+            route={"model": "gpt-5.6-sol", "effort": "xhigh"},
             outcome="completed",
             parent_attempt_id=first["attempt_id"],
         )
@@ -1410,7 +1420,7 @@ class ModelRoutingTests(unittest.TestCase):
             decision,
             ordinal=2,
             transition="escalation",
-            route={"model": "gpt-5.6-terra", "effort": "xhigh"},
+            route={"model": "gpt-5.6-sol", "effort": "xhigh"},
             outcome="completed",
             parent_attempt_id=first["attempt_id"],
         )
@@ -1438,7 +1448,7 @@ class ModelRoutingTests(unittest.TestCase):
             decision,
             ordinal=2,
             transition="escalation",
-            route={"model": "gpt-5.6-terra", "effort": "xhigh"},
+            route={"model": "gpt-5.6-sol", "effort": "xhigh"},
             outcome="completed",
             parent_attempt_id=first["attempt_id"],
         )
@@ -1459,7 +1469,7 @@ class ModelRoutingTests(unittest.TestCase):
             decision,
             ordinal=2,
             transition="fallback",
-            route={"model": "gpt-5.6-terra", "effort": "xhigh"},
+            route={"model": "gpt-5.6-sol", "effort": "xhigh"},
             outcome="failed",
             failure_class="insufficient_reasoning",
             parent_attempt_id=first["attempt_id"],
@@ -1471,7 +1481,7 @@ class ModelRoutingTests(unittest.TestCase):
             decision,
             ordinal=3,
             transition="escalation",
-            route={"model": "gpt-5.6-sol", "effort": "high"},
+            route={"model": "gpt-5.6-sol", "effort": "xhigh"},
             outcome="completed",
             parent_attempt_id=second["attempt_id"],
         )
@@ -1486,7 +1496,7 @@ class ModelRoutingTests(unittest.TestCase):
             transition="initial",
             route=decision["selected"],
             outcome="completed",
-            actual_route={"model": "gpt-5.6-terra", "effort": "xhigh"},
+            actual_route={"model": "gpt-5.6-sol", "effort": "xhigh"},
         )
         return self._record(decision, [attempt])
 
@@ -1564,6 +1574,8 @@ class ModelRoutingTests(unittest.TestCase):
                     "codex",
                     "--runtime-capabilities",
                     str(capability_input),
+                    "--reasoning-effort",
+                    "xhigh",
                 ]
             )
         result = subprocess.run(

@@ -12,15 +12,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-POLICY_SCHEMA = "agent-workflow.model-routing-policy.v1"
-CAPABILITY_SCHEMA = "agent-workflow.runtime-capabilities.v1"
+POLICY_SCHEMA = "agent-workflow.model-routing-policy.v2"
+CAPABILITY_SCHEMA = "agent-workflow.runtime-capabilities.v2"
 PACKET_SCHEMA = "agent-workflow.routing-packet.v1"
-DECISION_SCHEMA = "agent-workflow.routing-decision.v1"
+DECISION_SCHEMA = "agent-workflow.routing-decision.v2"
 
-CANONICAL_POLICY_ID = "quality-floor-codex-v1"
+CANONICAL_POLICY_ID = "responsibility-routing-codex-v2"
 CANONICAL_POLICY_VERSION = 1
 CANONICAL_POLICY_SEMANTICS_SHA256 = (
-    "sha256:2f7c8bdbd5c19fed632a8c025b5786ab9c0d84c35f0ae6c3ae57f61b117893d1"
+    "sha256:a95d420469cb4768c71e97c4c186cd7f838346c4c6c8c38ca169d76074c31669"
 )
 CAPABILITY_RECHECK_MAX_AGE = timedelta(hours=24)
 CAPABILITY_CLOCK_SKEW = timedelta(minutes=5)
@@ -30,18 +30,9 @@ RFC3339_RE = re.compile(
 )
 EVIDENCE_FRAGMENT_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 
-APPROVED_ROUTES = (
-    ("gpt-5.6-terra", "high"),
-    ("gpt-5.6-terra", "xhigh"),
-    ("gpt-5.6-sol", "high"),
-    ("gpt-5.6-sol", "xhigh"),
-    ("gpt-5.6-sol", "max"),
-)
-APPROVED_ROUTE_OBJECTS = tuple(
-    {"model": model, "effort": effort} for model, effort in APPROVED_ROUTES
-)
+APPROVED_MODELS = ("gpt-5.6-terra", "gpt-5.6-sol")
 EXCLUDED_MODELS = {"gpt-5.6-luna"}
-EXCLUDED_EFFORTS = {"low", "medium", "ultra"}
+REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 
 PACKET_TAXONOMY: dict[str, tuple[Any, ...] | type] = {
     "ambiguity": ("bounded", "material"),
@@ -74,8 +65,8 @@ POLICY_KEYS = {
     "adapter_scope",
     "content_sha256",
     "packet_taxonomy",
-    "automatic_floor",
-    "route_order",
+    "default_model",
+    "model_order",
     "automatic_exclusions",
     "decision_rules",
     "verifier_rules",
@@ -91,6 +82,7 @@ CAPABILITY_KEYS = {
     "dispatch_surface",
     "observed_at",
     "source",
+    "reasoning_effort",
     "content_sha256",
     "models",
 }
@@ -121,7 +113,7 @@ FAILURE_CLASSES = {
     "tool_failure",
 }
 MISSING_EVIDENCE_ACTIONS = {"more_discovery", "human_gate", "blocked"}
-CLASSIFICATIONS = {"general", "deep", "below_automatic_floor", "unclassified"}
+CLASSIFICATIONS = {"general", "deep", "excluded", "unclassified"}
 
 
 class RoutingError(ValueError):
@@ -153,9 +145,36 @@ def _route(value: Any, label: str = "route") -> dict[str, str]:
     return {"model": model, "effort": effort}
 
 
-def route_key(value: Any) -> tuple[str, str]:
+def route_key(value: Any) -> str:
     route = _route(value)
-    return route["model"], route["effort"]
+    return route["model"]
+
+
+def inherited_effort(capabilities: dict[str, Any]) -> str:
+    reasoning = _require_object(
+        capabilities.get("reasoning_effort"), "runtime capabilities.reasoning_effort"
+    )
+    _require_exact_keys(
+        reasoning,
+        {"source", "value", "locked"},
+        "runtime capabilities.reasoning_effort",
+    )
+    if reasoning.get("source") != "user_session":
+        raise RoutingError("runtime reasoning effort must come from user_session")
+    effort = reasoning.get("value")
+    if effort not in REASONING_EFFORTS:
+        raise RoutingError(
+            "runtime reasoning effort must be one of " + ", ".join(sorted(REASONING_EFFORTS))
+        )
+    if reasoning.get("locked") is not True:
+        raise RoutingError("runtime reasoning effort must be locked for the workflow")
+    return str(effort)
+
+
+def materialize_route(model: str, capabilities: dict[str, Any]) -> dict[str, str]:
+    if model not in APPROVED_MODELS:
+        raise RoutingError(f"model {model!r} is not approved for automatic routing")
+    return {"model": model, "effort": inherited_effort(capabilities)}
 
 
 def canonical_sha256(value: Any, omitted_keys: Iterable[str] = ()) -> str:
@@ -374,20 +393,17 @@ def _validate_rules(value: Any, kind: str) -> list[dict[str, Any]]:
                 if effect.get("gate") != "human_gate":
                     raise RoutingError(f"{label}.effect.gate must be human_gate")
             else:
-                route = _route(effect, f"{label}.effect")
-                if route_key(route) not in APPROVED_ROUTES:
-                    raise RoutingError(f"{label}.effect is not an approved automatic route")
-                if route_key(route) == APPROVED_ROUTES[-1]:
-                    raise RoutingError("Sol/max may only be reached by evidenced escalation")
+                _require_exact_keys(effect, {"model"}, f"{label}.effect")
+                if effect.get("model") not in APPROVED_MODELS:
+                    raise RoutingError(f"{label}.effect.model is not approved")
         else:
             _require_exact_keys(
                 effect,
-                {"minimum_route", "required", "missing_evidence_action"},
+                {"minimum_model", "required", "missing_evidence_action"},
                 f"{label}.effect",
             )
-            floor = _route(effect.get("minimum_route"), f"{label}.effect.minimum_route")
-            if route_key(floor) not in APPROVED_ROUTES:
-                raise RoutingError(f"{label}.effect.minimum_route is not approved")
+            if effect.get("minimum_model") not in APPROVED_MODELS:
+                raise RoutingError(f"{label}.effect.minimum_model is not approved")
             if not isinstance(effect.get("required"), bool):
                 raise RoutingError(f"{label}.effect.required must be boolean")
             if effect.get("missing_evidence_action") not in MISSING_EVIDENCE_ACTIONS:
@@ -422,23 +438,20 @@ def validate_policy_snapshot(value: Any) -> dict[str, Any]:
         raise RoutingError("routing policy.adapter_scope must be codex_builtin_subagents")
     if policy.get("packet_taxonomy") != _expected_taxonomy_json():
         raise RoutingError("routing policy.packet_taxonomy must match routing-packet.v1")
-    if _route(policy.get("automatic_floor"), "routing policy.automatic_floor") != APPROVED_ROUTE_OBJECTS[0]:
-        raise RoutingError("routing policy automatic floor must be gpt-5.6-terra/high")
-    routes = policy.get("route_order")
-    if routes != list(APPROVED_ROUTE_OBJECTS):
-        raise RoutingError("routing policy.route_order must equal the five approved routes")
+    if policy.get("default_model") != APPROVED_MODELS[0]:
+        raise RoutingError("routing policy.default_model must be gpt-5.6-terra")
+    if policy.get("model_order") != list(APPROVED_MODELS):
+        raise RoutingError("routing policy.model_order must be Terra then Sol")
     exclusions = _require_object(
         policy.get("automatic_exclusions"), "routing policy.automatic_exclusions"
     )
     _require_exact_keys(
         exclusions,
-        {"models", "efforts", "unclassified_models"},
+        {"models", "unclassified_models"},
         "routing policy.automatic_exclusions",
     )
     if set(exclusions.get("models", [])) != EXCLUDED_MODELS:
         raise RoutingError("routing policy must exclude exactly gpt-5.6-luna by model")
-    if set(exclusions.get("efforts", [])) != EXCLUDED_EFFORTS:
-        raise RoutingError("routing policy must exclude low, medium, and ultra efforts")
     if exclusions.get("unclassified_models") is not True:
         raise RoutingError("routing policy must exclude unclassified models")
     _validate_rules(policy.get("decision_rules"), "decision")
@@ -446,45 +459,43 @@ def validate_policy_snapshot(value: Any) -> dict[str, Any]:
     override = _require_object(policy.get("override_policy"), "routing policy.override_policy")
     _require_exact_keys(
         override,
-        {"lead_may_raise", "user_may_raise", "lower_request_action"},
+        {
+            "lead_may_raise_model",
+            "user_may_raise_model",
+            "effort_override_allowed",
+            "lower_model_request_action",
+        },
         "routing policy.override_policy",
     )
     if override != {
-        "lead_may_raise": True,
-        "user_may_raise": True,
-        "lower_request_action": "human_gate",
+        "lead_may_raise_model": True,
+        "user_may_raise_model": True,
+        "effort_override_allowed": False,
+        "lower_model_request_action": "human_gate",
     }:
-        raise RoutingError("routing policy.override_policy violates the quality floor")
+        raise RoutingError("routing policy.override_policy violates responsibility routing")
     fallback = _require_object(policy.get("fallback_policy"), "routing policy.fallback_policy")
     _require_exact_keys(
         fallback,
-        {"high_guard_fields", "low_risk_direction", "high_risk_action", "silent_fallback"},
+        {"terra_unavailable", "sol_unavailable", "silent_fallback"},
         "routing policy.fallback_policy",
     )
-    if fallback.get("high_guard_fields") != [
-        "claim_class=high_consequence",
-        "blast_radius=external_production",
-        "reversibility=hard",
-        "verifiability=judgment_only",
-        "approval_required=true",
-    ]:
-        raise RoutingError("routing policy.fallback_policy.high_guard_fields is invalid")
-    if fallback.get("low_risk_direction") != "upward_only":
-        raise RoutingError("routing fallback must be upward_only")
-    if fallback.get("high_risk_action") != "human_gate":
-        raise RoutingError("high-risk unavailable routes must human_gate")
+    if fallback.get("terra_unavailable") != "upgrade_to_sol_same_effort":
+        raise RoutingError("Terra unavailability must upgrade to Sol at the inherited effort")
+    if fallback.get("sol_unavailable") != "human_gate":
+        raise RoutingError("Sol unavailability must human_gate")
     if fallback.get("silent_fallback") is not False:
         raise RoutingError("silent fallback must be false")
     attempts = _require_object(policy.get("attempt_policy"), "routing policy.attempt_policy")
     _require_exact_keys(
         attempts,
-        {"same_route_retries", "route_changes", "sol_max_transition", "exhausted_action"},
+        {"same_model_retries", "model_changes", "allowed_model_change", "exhausted_action"},
         "routing policy.attempt_policy",
     )
-    if attempts.get("same_route_retries") != 1 or attempts.get("route_changes") != 1:
-        raise RoutingError("routing attempt caps must be one retry and one route change")
-    if attempts.get("sol_max_transition") != "sol_xhigh_insufficient_reasoning_only":
-        raise RoutingError("Sol/max transition policy is invalid")
+    if attempts.get("same_model_retries") != 1 or attempts.get("model_changes") != 1:
+        raise RoutingError("routing attempt caps must be one retry and one model change")
+    if attempts.get("allowed_model_change") != "terra_to_sol_same_effort":
+        raise RoutingError("routing model changes must be Terra to Sol at the inherited effort")
     if attempts.get("exhausted_action") != "repair_round_or_human_gate":
         raise RoutingError("routing attempt exhausted_action is invalid")
     semantic_digest = canonical_sha256(
@@ -492,7 +503,7 @@ def validate_policy_snapshot(value: Any) -> dict[str, Any]:
     )
     if semantic_digest != CANONICAL_POLICY_SEMANTICS_SHA256:
         raise RoutingError(
-            "routing policy semantics do not match the registered quality-floor-codex-v1 contract"
+            "routing policy semantics do not match the registered responsibility-routing-codex-v2 contract"
         )
     expected_digest = canonical_sha256(policy, omitted_keys=("content_sha256",))
     if policy.get("content_sha256") != expected_digest:
@@ -500,7 +511,11 @@ def validate_policy_snapshot(value: Any) -> dict[str, Any]:
     return copy.deepcopy(policy)
 
 
-def prepare_capability_snapshot(value: Any) -> dict[str, Any]:
+def prepare_capability_snapshot(
+    value: Any,
+    *,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
     """Normalize lead-provided capability input into a canonical immutable snapshot."""
 
     raw = _require_object(value, "runtime capabilities")
@@ -510,6 +525,17 @@ def prepare_capability_snapshot(value: Any) -> dict[str, Any]:
         raise RoutingError(f"runtime capabilities has unknown keys: {', '.join(unknown)}")
     normalized = copy.deepcopy(raw)
     normalized["schema_version"] = CAPABILITY_SCHEMA
+    for model in normalized.get("models", []):
+        if isinstance(model, dict):
+            # v1 inventories used this field for router-selected effort. In v2
+            # it is ignored because the user-session effort is authoritative.
+            model.pop("automatic_efforts", None)
+    if reasoning_effort is not None:
+        normalized["reasoning_effort"] = {
+            "source": "user_session",
+            "value": reasoning_effort,
+            "locked": True,
+        }
     normalized.setdefault("snapshot_version", 1)
     normalized.setdefault("snapshot_id", "pending")
     normalized["content_sha256"] = "pending"
@@ -535,6 +561,7 @@ def validate_capability_snapshot(value: Any) -> dict[str, Any]:
         if not isinstance(snapshot.get(key), str) or not snapshot.get(key):
             raise RoutingError(f"runtime capabilities.{key} must be a non-empty string")
     parse_rfc3339(snapshot.get("observed_at"), "runtime capabilities.observed_at")
+    inherited_effort(snapshot)
     if not isinstance(snapshot.get("snapshot_version"), int) or snapshot["snapshot_version"] < 1:
         raise RoutingError("runtime capabilities.snapshot_version must be an integer >= 1")
     models = snapshot.get("models")
@@ -546,7 +573,7 @@ def validate_capability_snapshot(value: Any) -> dict[str, Any]:
         model = _require_object(raw_model, label)
         _require_exact_keys(
             model,
-            {"id", "available", "classification", "supported_efforts", "automatic_efforts"},
+            {"id", "available", "classification", "supported_efforts"},
             label,
         )
         model_id = model.get("id")
@@ -559,24 +586,13 @@ def validate_capability_snapshot(value: Any) -> dict[str, Any]:
             raise RoutingError(f"{label}.available must be boolean")
         if model.get("classification") not in CLASSIFICATIONS:
             raise RoutingError(f"{label}.classification is invalid")
-        for key in ("supported_efforts", "automatic_efforts"):
-            efforts = model.get(key)
-            if not isinstance(efforts, list) or not all(
-                isinstance(item, str) for item in efforts
-            ):
-                raise RoutingError(f"{label}.{key} must be a string list")
-            if len(set(efforts)) != len(efforts):
-                raise RoutingError(f"{label}.{key} contains duplicates")
-        if not set(model["automatic_efforts"]).issubset(model["supported_efforts"]):
-            raise RoutingError(f"{label}.automatic_efforts must be supported")
-        if set(model["automatic_efforts"]) & EXCLUDED_EFFORTS:
-            raise RoutingError(f"{label}.automatic_efforts contains an excluded effort")
-        if model_id in EXCLUDED_MODELS and model["automatic_efforts"]:
-            raise RoutingError(f"{label} excluded model cannot have automatic efforts")
-        if model["classification"] in {"unclassified", "below_automatic_floor"} and model[
-            "automatic_efforts"
-        ]:
-            raise RoutingError(f"{label} unclassified/below-floor model cannot be automatic")
+        efforts = model.get("supported_efforts")
+        if not isinstance(efforts, list) or not all(isinstance(item, str) for item in efforts):
+            raise RoutingError(f"{label}.supported_efforts must be a string list")
+        if len(set(efforts)) != len(efforts):
+            raise RoutingError(f"{label}.supported_efforts contains duplicates")
+        if not set(efforts).issubset(REASONING_EFFORTS):
+            raise RoutingError(f"{label}.supported_efforts contains an unknown effort")
     expected_digest = canonical_sha256(snapshot, omitted_keys=("content_sha256",))
     if snapshot.get("content_sha256") != expected_digest:
         raise RoutingError("runtime capabilities.content_sha256 does not match canonical content")
@@ -591,22 +607,24 @@ def _model_record(capabilities: dict[str, Any], model_id: str) -> dict[str, Any]
 
 
 def route_is_eligible(capabilities: dict[str, Any], route: dict[str, str]) -> bool:
-    if route_key(route) not in APPROVED_ROUTES:
+    if route_key(route) not in APPROVED_MODELS:
+        return False
+    if route["effort"] != inherited_effort(capabilities):
         return False
     model = _model_record(capabilities, route["model"])
     if not model or model["available"] is not True:
         return False
     if model["classification"] not in {"general", "deep"}:
         return False
-    return route["effort"] in model["automatic_efforts"]
+    return route["effort"] in model["supported_efforts"]
 
 
 def route_rank(policy: dict[str, Any], route: dict[str, str]) -> int:
     key = route_key(route)
-    for index, item in enumerate(policy["route_order"]):
-        if route_key(item) == key:
+    for index, item in enumerate(policy["model_order"]):
+        if item == key:
             return index
-    raise RoutingError(f"route {key[0]}/{key[1]} is not in policy.route_order")
+    raise RoutingError(f"model {key} is not in policy.model_order")
 
 
 def _matches(match: dict[str, list[Any]], facts: dict[str, Any]) -> bool:
@@ -630,7 +648,11 @@ def high_guard_triggered(facts: dict[str, Any]) -> bool:
     )
 
 
-def normalize_request(value: Any) -> dict[str, Any]:
+def normalize_request(
+    value: Any,
+    *,
+    required_effort: str | None = None,
+) -> dict[str, Any]:
     request = _require_object(value, "routing request")
     _require_exact_keys(
         request,
@@ -656,8 +678,12 @@ def normalize_request(value: Any) -> dict[str, Any]:
             raise RoutingError("automatic routing request cannot include override fields")
     else:
         requested = _route(requested, "routing request.requested_route")
-        if route_key(requested) not in APPROVED_ROUTES:
-            raise RoutingError("routing request.requested_route is not approved")
+        if route_key(requested) not in APPROVED_MODELS:
+            raise RoutingError("routing request.requested_route model is not approved")
+        if required_effort is not None and requested["effort"] != required_effort:
+            raise RoutingError(
+                "routing request cannot override the workflow-inherited reasoning effort"
+            )
         if not reason.strip() or not refs:
             raise RoutingError("lead/user route requests require reason and evidence_refs")
     return {
@@ -677,10 +703,11 @@ def evaluate_route(
     policy = validate_policy_snapshot(policy)
     capabilities = validate_capability_snapshot(capabilities)
     facts = validate_packet_facts(facts)
-    request = normalize_request(request)
+    effort = inherited_effort(capabilities)
+    request = normalize_request(request, required_effort=effort)
     rule = _first_match(policy["decision_rules"], facts)
     effect = rule["effect"]
-    floor = copy.deepcopy(policy["automatic_floor"])
+    floor = materialize_route(str(policy["default_model"]), capabilities)
     if effect.get("gate") == "human_gate":
         return {
             "matched_rule_id": rule["id"],
@@ -689,7 +716,7 @@ def evaluate_route(
             "override": {"applied": False, "direction": "none"},
             "status": "human_gate",
         }
-    minimum = _route(effect, "matched decision effect")
+    minimum = materialize_route(str(effect["model"]), capabilities)
     candidate = copy.deepcopy(minimum)
     override = {"applied": False, "direction": "none"}
     if request["source"] in {"lead", "user"}:
@@ -722,12 +749,8 @@ def evaluate_route(
             "status": "human_gate",
         }
     start = route_rank(policy, candidate)
-    for route in policy["route_order"][start + 1 :]:
-        if (
-            request["source"] == "automatic"
-            and route_key(route) == APPROVED_ROUTES[-1]
-        ):
-            continue
+    for model in policy["model_order"][start + 1 :]:
+        route = materialize_route(str(model), capabilities)
         if route_is_eligible(capabilities, route):
             fallback_override = copy.deepcopy(override)
             fallback_override["capability_fallback_from"] = candidate
@@ -747,15 +770,20 @@ def evaluate_route(
     }
 
 
-def evaluate_verifier_floor(policy: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
+def evaluate_verifier_floor(
+    policy: dict[str, Any],
+    capabilities: dict[str, Any],
+    facts: dict[str, Any],
+) -> dict[str, Any]:
     policy = validate_policy_snapshot(policy)
+    capabilities = validate_capability_snapshot(capabilities)
     facts = validate_packet_facts(facts)
     rule = _first_match(policy["verifier_rules"], facts)
     effect = rule["effect"]
     return {
         "rule_id": rule["id"],
         "required": effect["required"],
-        "minimum_route": copy.deepcopy(effect["minimum_route"]),
+        "minimum_route": materialize_route(str(effect["minimum_model"]), capabilities),
         "verifier_lane_ids": [],
         "independent_of_lane_ids": [],
         "required_evidence": [],
@@ -782,7 +810,7 @@ def build_planned_decision(
         "evidence_refs": [],
     }
     result = evaluate_route(policy, capabilities, facts, request)
-    floor = evaluate_verifier_floor(policy, facts)
+    floor = evaluate_verifier_floor(policy, capabilities, facts)
     floor["verifier_lane_ids"] = list(verifier_lane_ids or [])
     floor["independent_of_lane_ids"] = list(independent_of_lane_ids or [])
     floor["required_evidence"] = list(required_evidence or [])
@@ -800,7 +828,10 @@ def build_planned_decision(
             "content_sha256": capabilities["content_sha256"],
         },
         "facts": copy.deepcopy(facts),
-        "request": normalize_request(request),
+        "request": normalize_request(
+            request,
+            required_effort=inherited_effort(capabilities),
+        ),
         "matched_rule_id": result["matched_rule_id"],
         "minimum": result["minimum"],
         "selected": result["selected"],
@@ -973,7 +1004,10 @@ def validate_planned_decision(
         if ref != expected_ref:
             raise RoutingError(f"routing decision.{key} does not match its snapshot")
     facts = validate_packet_facts(decision.get("facts"))
-    request = normalize_request(decision.get("request"))
+    request = normalize_request(
+        decision.get("request"),
+        required_effort=inherited_effort(capabilities),
+    )
     if request["source"] in {"lead", "user"}:
         validate_evidence_refs(
             request["evidence_refs"],
@@ -984,7 +1018,7 @@ def validate_planned_decision(
     for key in ("matched_rule_id", "minimum", "selected", "override", "status"):
         if decision.get(key) != recomputed.get(key):
             raise RoutingError(f"routing decision.{key} does not match first-match evaluation")
-    expected_floor = evaluate_verifier_floor(policy, facts)
+    expected_floor = evaluate_verifier_floor(policy, capabilities, facts)
     _validate_verification_floor(decision.get("verification_floor"), expected_floor)
     expected_digest = canonical_sha256(decision, omitted_keys=("decision_sha256",))
     if decision.get("decision_sha256") != expected_digest:
@@ -996,7 +1030,8 @@ def _next_eligible_route(
     policy: dict[str, Any], capabilities: dict[str, Any], route: dict[str, str]
 ) -> dict[str, str] | None:
     start = route_rank(policy, route)
-    for candidate in policy["route_order"][start + 1 :]:
+    for model in policy["model_order"][start + 1 :]:
+        candidate = materialize_route(str(model), capabilities)
         if route_is_eligible(capabilities, candidate):
             return copy.deepcopy(candidate)
     return None
@@ -1032,7 +1067,7 @@ def validate_attempts(
         raise RoutingError("runner lane record.attempts must be a non-empty append-only list")
     seen_ids: set[str] = set()
     retries = 0
-    route_changes = 0
+    model_changes = 0
     previous: dict[str, Any] | None = None
     required_attempt_keys = {
         "attempt_id",
@@ -1078,8 +1113,10 @@ def validate_attempts(
         if attempt.get("planned_decision_sha256") != decision["decision_sha256"]:
             raise RoutingError(f"{label}.planned_decision_sha256 does not match decision")
         route = _route(attempt.get("route"), f"{label}.route")
-        if route_key(route) not in APPROVED_ROUTES or not route_is_eligible(capabilities, route):
+        if route_key(route) not in APPROVED_MODELS or not route_is_eligible(capabilities, route):
             raise RoutingError(f"{label}.route is not eligible in the capability snapshot")
+        if route["effort"] != inherited_effort(capabilities):
+            raise RoutingError(f"{label}.route must preserve the workflow-inherited effort")
         outcome = attempt.get("outcome")
         failure_class = attempt.get("failure_class")
         if outcome not in OUTCOMES:
@@ -1123,8 +1160,6 @@ def validate_attempts(
                 raise RoutingError("first routing attempt must be initial with no parent")
             if route != decision["selected"]:
                 raise RoutingError("initial attempt route must equal the immutable planned selection")
-            if route_key(route) == APPROVED_ROUTES[-1] and decision["request"]["source"] == "automatic":
-                raise RoutingError("automatic Sol/max cannot be an initial attempt")
         else:
             assert previous is not None
             previous_outcome = previous.get("outcome")
@@ -1145,26 +1180,28 @@ def validate_attempts(
                 if previous_failure not in {"context_failure", "tool_failure"}:
                     raise RoutingError("retry must follow context_failure or tool_failure")
             elif transition == "fallback":
-                route_changes += 1
+                model_changes += 1
                 if previous_outcome != "unavailable":
                     raise RoutingError("fallback must follow outcome=unavailable")
                 if previous_failure != "route_unavailable":
                     raise RoutingError("fallback must follow route_unavailable")
-                if high_guard_triggered(decision["facts"]):
-                    raise RoutingError("high-guard route unavailability requires human_gate")
                 expected_fallback = _next_eligible_route(policy, capabilities, previous_route)
                 if expected_fallback is None or route != expected_fallback:
-                    raise RoutingError("fallback must use the first later eligible route")
-                if route_key(route) == APPROVED_ROUTES[-1]:
-                    raise RoutingError("automatic Sol/max cannot be a fallback attempt")
+                    raise RoutingError("fallback must upgrade Terra to Sol at the inherited effort")
             elif transition == "escalation":
-                route_changes += 1
+                model_changes += 1
                 if previous_outcome != "failed":
                     raise RoutingError("escalation must follow outcome=failed")
                 if previous_failure != "insufficient_reasoning":
                     raise RoutingError("escalation must follow insufficient_reasoning")
-                if route_rank(policy, route) != route_rank(policy, previous_route) + 1:
-                    raise RoutingError("escalation must advance exactly one route-order position")
+                if (
+                    previous_route["model"] != "gpt-5.6-terra"
+                    or route["model"] != "gpt-5.6-sol"
+                    or route["effort"] != previous_route["effort"]
+                ):
+                    raise RoutingError(
+                        "escalation must change Terra to Sol without changing effort"
+                    )
                 validate_evidence_refs(
                     previous.get("evidence_refs"),
                     evidence_root=evidence_root,
@@ -1174,10 +1211,10 @@ def validate_attempts(
             else:
                 raise RoutingError("only the first attempt may use transition=initial")
         previous = attempt
-    if retries > policy["attempt_policy"]["same_route_retries"]:
+    if retries > policy["attempt_policy"]["same_model_retries"]:
         raise RoutingError("same-route retry cap exceeded")
-    if route_changes > policy["attempt_policy"]["route_changes"]:
-        raise RoutingError("route-change cap exceeded")
+    if model_changes > policy["attempt_policy"]["model_changes"]:
+        raise RoutingError("model-change cap exceeded")
     terminal = attempts[-1]
     if record.get("terminal_attempt_id") != terminal["attempt_id"]:
         raise RoutingError("terminal_attempt_id must point to the final append-only attempt")
@@ -1202,6 +1239,7 @@ def expected_swarm_projection(
         "decision_id": decision["decision_id"],
         "planned_route": copy.deepcopy(decision["selected"]),
         "terminal_actual_route": copy.deepcopy(actual),
+        "effort_source": "user_session",
         "route_status": (
             terminal.get("outcome") if isinstance(terminal, dict) else decision["status"]
         ),

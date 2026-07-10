@@ -266,6 +266,8 @@ def _model_parts(agent: dict[str, Any]) -> list[str]:
         parts = [_friendly_model(route["model"])]
         if isinstance(route.get("effort"), str) and route["effort"].strip():
             parts.append(route["effort"])
+        if routing.get("effort_source") == "user_session":
+            parts.append("inherited")
     else:
         model = agent.get("model")
         if isinstance(model, str) and model.strip():
@@ -558,6 +560,7 @@ def build_initial_card(
                 "decision_id": routing.get("decision_id"),
                 "planned_route": routing.get("selected"),
                 "terminal_actual_route": None,
+                "effort_source": "user_session",
                 "route_status": routing.get("status", "draft"),
                 "attempt_count": 0,
             }

@@ -46,10 +46,10 @@ class SwarmCardTests(unittest.TestCase):
             round_id="round-001",
             round_budget=3,
             lanes=[
-                lane("discover-01", "discover", "gpt-5.6-terra", "high"),
+                lane("discover-01", "discover", "gpt-5.6-terra", "xhigh"),
                 lane("implement-01", "implement", "gpt-5.6-terra", "xhigh"),
-                lane("repair-01", "repair", "gpt-5.6-terra", "high"),
-                lane("review-01", "review", "gpt-5.6-terra", "high"),
+                lane("repair-01", "repair", "gpt-5.6-terra", "xhigh"),
+                lane("review-01", "review", "gpt-5.6-sol", "xhigh"),
                 lane("verify-01", "verify", "gpt-5.6-sol", "xhigh"),
             ],
             goal="修掉 validator false-pass，直到沒有 P2+ open risk。",
@@ -74,13 +74,22 @@ class SwarmCardTests(unittest.TestCase):
 
             self.assertIn("> **Agent Workflow · RUNNING**", output)
             self.assertIn(r"修掉 validator false\-pass，直到沒有 P2\+ open risk。", output)
-            self.assertIn("> ■ complete · `discover-01` · discover *(Terra · high)*", output)
-            self.assertIn("> ◐ running · `implement-01` · implement *(Terra · xhigh)*", output)
             self.assertIn(
-                "> △ waiting: review findings · `repair-01` · repair *(Terra · high)*",
+                "> ■ complete · `discover-01` · discover *(Terra · xhigh · inherited)*",
                 output,
             )
-            self.assertIn("> □ not started · `verify-01` · verify *(Sol · xhigh)*", output)
+            self.assertIn(
+                "> ◐ running · `implement-01` · implement *(Terra · xhigh · inherited)*",
+                output,
+            )
+            self.assertIn(
+                "> △ waiting: review findings · `repair-01` · repair *(Terra · xhigh · inherited)*",
+                output,
+            )
+            self.assertIn(
+                "> □ not started · `verify-01` · verify *(Sol · xhigh · inherited)*",
+                output,
+            )
             self.assertNotIn("◆", output)
             self.assertNotIn("◇", output)
             self.assertNotIn("●", output)
@@ -198,7 +207,7 @@ class SwarmCardTests(unittest.TestCase):
             self.assertIn("Agent Workflow · RUNNING", emitted.stdout)
             self.assertIn("由 authoritative artifacts 更新。", emitted.stdout)
             self.assertIn(
-                "■ complete · `implement-01` · implement *(Sol · xhigh)*",
+                "■ complete · `implement-01` · implement *(Sol · xhigh · inherited)*",
                 emitted.stdout,
             )
             persisted = json.loads(

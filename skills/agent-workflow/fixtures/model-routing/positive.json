@@ -4,40 +4,41 @@
     "dispatch_surface": "multi_agent_v1",
     "observed_at": "2026-07-10T00:00:00Z",
     "source": "fixture_lead_recorded_tool_schema",
+    "reasoning_effort": {
+      "source": "user_session",
+      "value": "xhigh",
+      "locked": true
+    },
     "models": [
       {
         "id": "gpt-5.6-terra",
         "available": true,
         "classification": "general",
-        "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
-        "automatic_efforts": ["high", "xhigh"]
+        "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]
       },
       {
         "id": "gpt-5.6-sol",
         "available": true,
         "classification": "deep",
-        "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
-        "automatic_efforts": ["high", "xhigh", "max"]
+        "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]
       },
       {
         "id": "gpt-5.6-luna",
         "available": true,
-        "classification": "below_automatic_floor",
-        "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
-        "automatic_efforts": []
+        "classification": "excluded",
+        "supported_efforts": ["low", "medium", "high", "xhigh", "max"]
       },
       {
         "id": "gpt-5.5",
         "available": true,
         "classification": "unclassified",
-        "supported_efforts": ["high", "xhigh"],
-        "automatic_efforts": []
+        "supported_efforts": ["high", "xhigh"]
       }
     ]
   },
   "route_cases": [
     {
-      "name": "terra_high_default",
+      "name": "terra_bounded_execution",
       "facts": {
         "ambiguity": "bounded",
         "coupling": "local",
@@ -50,11 +51,11 @@
         "approval_required": false
       },
       "expected_status": "planned",
-      "expected_route": "gpt-5.6-terra/high",
-      "expected_rule": "route.terra_high.default"
+      "expected_route": "gpt-5.6-terra/xhigh",
+      "expected_rule": "route.terra.bounded_execution"
     },
     {
-      "name": "terra_xhigh_material",
+      "name": "sol_material_ambiguity",
       "facts": {
         "ambiguity": "material",
         "coupling": "local",
@@ -67,11 +68,11 @@
         "approval_required": false
       },
       "expected_status": "planned",
-      "expected_route": "gpt-5.6-terra/xhigh",
-      "expected_rule": "route.terra_xhigh.material_ambiguity"
+      "expected_route": "gpt-5.6-sol/xhigh",
+      "expected_rule": "route.sol.material_ambiguity"
     },
     {
-      "name": "sol_high_high_consequence",
+      "name": "sol_high_consequence",
       "facts": {
         "ambiguity": "bounded",
         "coupling": "local",
@@ -84,11 +85,11 @@
         "approval_required": false
       },
       "expected_status": "planned",
-      "expected_route": "gpt-5.6-sol/high",
-      "expected_rule": "route.sol_high.high_consequence"
+      "expected_route": "gpt-5.6-sol/xhigh",
+      "expected_rule": "route.sol.judgment_claim"
     },
     {
-      "name": "sol_xhigh_novel_cross_boundary",
+      "name": "sol_thinking_role",
       "facts": {
         "ambiguity": "material",
         "coupling": "cross_boundary",
@@ -102,10 +103,10 @@
       },
       "expected_status": "planned",
       "expected_route": "gpt-5.6-sol/xhigh",
-      "expected_rule": "route.sol_xhigh.novel_cross_boundary"
+      "expected_rule": "route.sol.thinking_role"
     },
     {
-      "name": "sol_xhigh_high_consequence_verifier",
+      "name": "sol_verify_role",
       "facts": {
         "ambiguity": "bounded",
         "coupling": "local",
@@ -119,7 +120,7 @@
       },
       "expected_status": "planned",
       "expected_route": "gpt-5.6-sol/xhigh",
-      "expected_rule": "route.sol_xhigh.final_high_consequence_verifier"
+      "expected_rule": "route.sol.thinking_role"
     },
     {
       "name": "approval_human_gate",

@@ -2921,6 +2921,7 @@ def validate_model_routing(
         "adapter",
         "policy_snapshot",
         "capability_snapshot",
+        "reasoning_effort",
         "dispatch_gate",
     }
     missing = sorted(expected_keys - set(block))
@@ -2975,6 +2976,11 @@ def validate_model_routing(
     capabilities = snapshots.get("capability_snapshot")
     if not isinstance(policy, dict) or not isinstance(capabilities, dict):
         return None
+    if block.get("reasoning_effort") != capabilities.get("reasoning_effort"):
+        failures.append(
+            "orchestration.model_routing.reasoning_effort must match the locked "
+            "user-session effort in runtime-capabilities.json"
+        )
     if mode in STRICT_MODES:
         orchestrator = orchestration.get("orchestrator")
         adapter = (
@@ -3010,7 +3016,7 @@ def validate_model_routing(
                 f"orchestration.rounds[{round_index}].lanes[{lane_index}].routing"
             )
             if lane_spec.get("agent_count") != 1:
-                failures.append(f"{label} requires agent_count=1 in routed v1")
+                failures.append(f"{label} requires agent_count=1 in routed v2")
             routing = lane_spec.get("routing")
             if not isinstance(routing, dict):
                 failures.append(f"{label} is required when model routing is enabled")

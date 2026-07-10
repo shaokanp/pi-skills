@@ -4,7 +4,7 @@
     {"name": "duplicate_priority", "mutation": "duplicate_priority"},
     {"name": "missing_default", "mutation": "missing_default"},
     {"name": "luna_route", "mutation": "luna_route"},
-    {"name": "medium_route", "mutation": "medium_route"},
+    {"name": "effort_in_policy", "mutation": "effort_in_policy"},
     {"name": "remove_approval_rule", "mutation": "remove_approval_rule"},
     {"name": "remove_high_consequence_rule", "mutation": "remove_high_consequence_rule"},
     {"name": "remove_external_rule", "mutation": "remove_external_rule"},
@@ -16,9 +16,8 @@
     {"name": "digest_mismatch", "mutation": "digest_mismatch"}
   ],
   "capability_mutations": [
-    {"name": "luna_automatic", "mutation": "luna_automatic"},
-    {"name": "unclassified_automatic", "mutation": "unclassified_automatic"},
-    {"name": "unsupported_automatic_effort", "mutation": "unsupported_automatic_effort"},
+    {"name": "unsupported_inherited_effort", "mutation": "unsupported_inherited_effort"},
+    {"name": "unlocked_inherited_effort", "mutation": "unlocked_inherited_effort"},
     {"name": "malformed_observed_at", "mutation": "malformed_observed_at"},
     {"name": "capability_digest_mismatch", "mutation": "digest_mismatch"}
   ],

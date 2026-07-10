@@ -288,7 +288,7 @@ Render cards with `scripts/render_swarm_card.py`. It uses Markdown blockquotes
 as the left rail and one agent per line, so Chinese text, renderer font fallback,
 and mixed-width status symbols never need a calculated right edge. Every symbol
 is immediately followed by a status label. Executor kind remains durable JSON
-metadata but has no symbol; model and effort appear in italic parentheses.
+metadata but has no symbol; model and inherited effort appear in italic parentheses.
 Before rendering, the helper projects workflow status and round from
 `state.json`, goal and planned route from `orchestration.json`, terminal route
 from `runner-evidence.json`, and completed/blocked/failed status from lane
@@ -304,17 +304,17 @@ authoritative.
 > Fix validator false-pass paths until no P2+ risk remains.
 >
 > **Discover**
-> ■ complete · `discover-01` · current-state explorer *(Terra · high)*
+> ■ complete · `discover-01` · current-state explorer *(Terra · xhigh · inherited)*
 >
 > **Implement & Repair**
-> ◐ running · `implement-01` · bounded writer *(Terra · xhigh)*
-> △ waiting: review findings · `repair-01` · targeted repair *(Terra · high)*
+> ◐ running · `implement-01` · bounded writer *(Terra · xhigh · inherited)*
+> △ waiting: review findings · `repair-01` · targeted repair *(Terra · xhigh · inherited)*
 >
 > **Review & Challenge**
-> □ not started · `review-01` · independent review *(Terra · high)*
+> □ not started · `review-01` · independent review *(Sol · xhigh · inherited)*
 >
 > **Verify**
-> □ not started · `verify-01` · evidence gate *(Sol · xhigh)*
+> □ not started · `verify-01` · evidence gate *(Sol · xhigh · inherited)*
 >
 > **Gate** Pending · Open P2+: 0
 ```
@@ -707,7 +707,8 @@ migration is required, and the extra lane fields remain harmless optional data.
 
 ## Opt-In Model Routing Artifacts
 
-Routing is feature-gated inside the existing v1 workspace schemas. It is enabled only when `orchestration.model_routing.enabled` is exactly `true`, and only for `codex_builtin_subagents`. Missing or disabled routing preserves legacy workspaces, ordinary v1 workspaces, manual simulation, Claude Code runners, and runner records without attempts.
+Routing is feature-gated inside the existing workspace. It is enabled only when `orchestration.model_routing.enabled` is exactly `true`, and only for `codex_builtin_subagents`. Missing or disabled routing preserves ordinary workspaces, manual simulation, Claude Code runners, and runner records without attempts. Responsibility routing uses policy, capability, and decision schema v2.
+Already-dispatched v1 routed workspaces are never reinterpreted as v2. Resume them with their pinned skill snapshot or create a new v2 round plan before dispatching new attempts. A v1 capability inventory may be supplied to the new scaffold; its obsolete `automatic_efforts` fields are discarded because effort now comes from the user session.
 
 Scaffold with explicit capability input:
 
@@ -716,6 +717,7 @@ python3 scripts/new_workflow.py "Routed workflow" \
   --runner-mode codex_builtin_subagents \
   --model-routing codex \
   --runtime-capabilities /path/to/capabilities.json \
+  --reasoning-effort xhigh \
   --lanes discover,implement,verify
 ```
 
@@ -728,7 +730,7 @@ The scaffold writes `routing-policy.json` and `runtime-capabilities.json`, then 
   "adapter": "codex_builtin_subagents",
   "policy_snapshot": {
     "path": "routing-policy.json",
-    "snapshot_id": "quality-floor-codex-v1-policy-v1",
+    "snapshot_id": "responsibility-routing-codex-v2-policy-v1",
     "content_sha256": "sha256:..."
   },
   "capability_snapshot": {
@@ -736,27 +738,30 @@ The scaffold writes `routing-policy.json` and `runtime-capabilities.json`, then 
     "snapshot_id": "runtime-capabilities-...",
     "content_sha256": "sha256:..."
   },
+  "reasoning_effort": {
+    "source": "user_session",
+    "value": "xhigh",
+    "locked": true
+  },
   "dispatch_gate": "python3 scripts/verify_workflow.py <workflow-dir> --mode planned"
 }
 ```
 
-Snapshot digests use canonical UTF-8 JSON with sorted keys, compact separators, `ensure_ascii=false`, and the root `content_sha256` field omitted. Snapshot IDs and digests are copied into every decision. A digest mismatch fails closed. The registered v1 policy also has a pinned semantic fingerprint: changing `policy_id`, `policy_version`, or deleting required decision/verifier protections fails even when the edited snapshot has a freshly recomputed content digest.
+Snapshot digests use canonical UTF-8 JSON with sorted keys, compact separators, `ensure_ascii=false`, and the root `content_sha256` field omitted. Snapshot IDs and digests are copied into every decision. A digest mismatch fails closed. The registered v2 policy also has a pinned semantic fingerprint: changing `policy_id`, `policy_version`, or deleting required decision/verifier protections fails even when the edited snapshot has a freshly recomputed content digest.
 
-`runtime-capabilities.json` must use a valid timezone-aware RFC3339 `observed_at`. Supplying that file does not certify current availability or the native runner surface. Before `--mode planned`, `runner_adapter.capability_evidence` must be an explicit lead-recorded recheck with `source: lead_agent`, `verified: true`, an RFC3339 `checked_at`, a substantive summary, and the exact capability snapshot digest. The recheck cannot predate the observation, be materially future-dated, or exceed the freshness window enforced by the validator.
+`runtime-capabilities.json` must use a valid timezone-aware RFC3339 `observed_at`. The scaffold adds one locked `reasoning_effort` with `source: user_session`; every model must advertise that effort in `supported_efforts` before it can run. Supplying the inventory does not certify current availability or the native runner surface. Before `--mode planned`, `runner_adapter.capability_evidence` must be an explicit lead-recorded recheck with `source: lead_agent`, `verified: true`, an RFC3339 `checked_at`, a substantive summary, and the exact capability snapshot digest. The recheck cannot predate the observation, be materially future-dated, or exceed the freshness window enforced by the validator.
 
 ### Route Policy
 
-Terra/high is the automatic quality floor. The ordered allowed routes are:
+The router chooses only between two models:
 
 ```text
-gpt-5.6-terra/high
-gpt-5.6-terra/xhigh
-gpt-5.6-sol/high
-gpt-5.6-sol/xhigh
-gpt-5.6-sol/max
+Sol   decides, interprets, plans, reviews, challenges, verifies,
+      or handles ambiguity, cross-boundary work, novelty, and high risk.
+Terra executes a bounded packet with clear inputs, scope, and checks.
 ```
 
-Ordered first-match rules select among the first four routes. Automatic Sol/max is allowed only as a one-step escalation from Sol/xhigh after an `insufficient_reasoning` outcome with substantive evidence. Automatic routing excludes Luna, low, medium, ultra, and unclassified models. A lead or user may raise a planned route with a reason and evidence references; a lower request or unavailable high-guard route becomes a human gate. Route-changing evidence references must be safe POSIX workspace-relative paths, may not traverse parents or point to ephemeral/absolute locations, and must resolve to existing substantive artifacts. Escalation evidence must bind to the immediately preceding failed attempt.
+Reasoning effort is not part of that decision. Use a runtime-provided current effort when available or the user's explicit statement; if neither is available, ask instead of guessing. The session effort is snapshotted once and copied unchanged into every minimum, selected, dispatched, and actual route. A lead or user may raise Terra to Sol with a reason and evidence references, but may not lower a Sol minimum or alter effort per lane. Terra unavailability may fall forward to Sol at the same effort; Sol unavailability becomes a human gate. An evidenced `insufficient_reasoning` transition may likewise change only Terra to Sol at the same effort. Route-changing evidence references must be safe POSIX workspace-relative paths, may not traverse parents or point to ephemeral/absolute locations, and must resolve to existing substantive artifacts. Escalation evidence must bind to the immediately preceding failed attempt.
 
 ### Planned Lane Decision
 
@@ -764,7 +769,7 @@ Every enabled routed lane has exactly one agent and one `routing` decision under
 
 ```json
 {
-  "schema_version": "agent-workflow.routing-decision.v1",
+  "schema_version": "agent-workflow.routing-decision.v2",
   "packet_id": "packet-implement-01",
   "decision_id": "decision-implement-01",
   "decision_sha256": "sha256:...",
@@ -787,14 +792,14 @@ Every enabled routed lane has exactly one agent and one `routing` decision under
     "reason": "",
     "evidence_refs": []
   },
-  "matched_rule_id": "route.terra_high.default",
-  "minimum": {"model": "gpt-5.6-terra", "effort": "high"},
-  "selected": {"model": "gpt-5.6-terra", "effort": "high"},
+  "matched_rule_id": "route.terra.bounded_execution",
+  "minimum": {"model": "gpt-5.6-terra", "effort": "xhigh"},
+  "selected": {"model": "gpt-5.6-terra", "effort": "xhigh"},
   "override": {"applied": false, "direction": "none"},
   "verification_floor": {
-    "rule_id": "verify.terra_high.routine",
+    "rule_id": "verify.terra.routine",
     "required": false,
-    "minimum_route": {"model": "gpt-5.6-terra", "effort": "high"},
+    "minimum_route": {"model": "gpt-5.6-terra", "effort": "xhigh"},
     "verifier_lane_ids": [],
     "independent_of_lane_ids": [],
     "required_evidence": [],
@@ -825,8 +830,8 @@ Keep one `runner-evidence.json agents[]` record per round/lane. Add routing iden
       "parent_attempt_id": null,
       "decision_id": "decision-implement-01",
       "planned_decision_sha256": "sha256:...",
-      "route": {"model": "gpt-5.6-terra", "effort": "high"},
-      "actual_route": {"model": "gpt-5.6-terra", "effort": "high"},
+      "route": {"model": "gpt-5.6-terra", "effort": "xhigh"},
+      "actual_route": {"model": "gpt-5.6-terra", "effort": "xhigh"},
       "outcome": "completed",
       "failure_class": null,
       "evidence_refs": [],
@@ -845,16 +850,16 @@ Keep one `runner-evidence.json agents[]` record per round/lane. Add routing iden
 }
 ```
 
-Ordinals are contiguous, IDs are unique, and every child points to the immediately preceding attempt. `retry` keeps the same route after context/tool failure; `fallback` follows an `outcome: unavailable` plus `failure_class: route_unavailable` parent and moves upward without crossing the computed floor; `escalation` advances one route after evidenced insufficient reasoning. One retry and one route change are allowed. The top-level lifecycle fields and `terminal_attempt_id` project the last attempt. A completed attempt is terminal, and its actual route must equal its dispatched route. Final mode requires every routed lane's terminal attempt to be completed; executed mode may retain a failed/unavailable attempt only while the lane/workflow gate remains non-pass.
+Ordinals are contiguous, IDs are unique, and every child points to the immediately preceding attempt. `retry` keeps model and effort after context/tool failure; `fallback` follows an unavailable Terra attempt and may use Sol at the same effort; `escalation` follows evidenced insufficient reasoning and may likewise change only Terra to Sol without changing effort. One retry and one model change are allowed. The top-level lifecycle fields and `terminal_attempt_id` project the last attempt. A completed attempt is terminal, and its actual route must equal its dispatched route. Final mode requires every routed lane's terminal attempt to be completed; executed mode may retain a failed/unavailable attempt only while the lane/workflow gate remains non-pass.
 
 ### Verifier Floor And Display Projection
 
 Claim facts determine whether verification is required and its minimum route. Planned mode validates verifier membership, author bindings, and route floors before dispatch. Final mode requires every named verifier to be a planned `verify` lane that completes with a pass gate, has a completed terminal actual route at or above the floor, uses a different recorded `agent_id` and `native_handle` from every lane named in `independent_of_lane_ids`, and exposes every `required_evidence` name as a substantive passing check. Missing evidence follows the decision's `more_discovery`, `human_gate`, or `blocked` action; it never silently passes.
 
-Capability data, identities, attempts, and actual routes are lead-recorded evidence in v1, not runtime attestation. Reports must say so. `swarm-card.json phases[].agents[].routing` is only a projection of the planned decision and terminal attempt:
+Capability data, identities, attempts, and actual routes are lead-recorded evidence in v2, not runtime attestation. Reports must say so. `swarm-card.json phases[].agents[].routing` is only a projection of the planned decision and terminal attempt:
 
 ```text
-packet_id, decision_id, planned_route, terminal_actual_route, route_status, attempt_count
+packet_id, decision_id, planned_route, terminal_actual_route, effort_source, route_status, attempt_count
 ```
 
 When a card exists, final mode recomputes these fields and rejects drift. The card is optional and cannot replace policy snapshots, decisions, runner attempts, lifecycle evidence, or verifier output.

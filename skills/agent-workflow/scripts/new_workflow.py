@@ -284,13 +284,17 @@ def build_lane_specs(
     return specs
 
 
-def load_runtime_capability_input(path: str) -> dict[str, object]:
+def load_runtime_capability_input(
+    path: str,
+    *,
+    reasoning_effort: str,
+) -> dict[str, object]:
     source = Path(path)
     if not source.is_file():
         raise SystemExit(f"--runtime-capabilities does not exist: {source}")
     try:
         value = json.loads(source.read_text(encoding="utf-8"))
-        return prepare_capability_snapshot(value)
+        return prepare_capability_snapshot(value, reasoning_effort=reasoning_effort)
     except (OSError, json.JSONDecodeError, RoutingError) as exc:
         raise SystemExit(f"Invalid --runtime-capabilities input: {exc}") from exc
 
@@ -312,6 +316,7 @@ def build_model_routing_block(
             "snapshot_id": capabilities["snapshot_id"],
             "content_sha256": capabilities["content_sha256"],
         },
+        "reasoning_effort": capabilities["reasoning_effort"],
         "dispatch_gate": "python3 scripts/verify_workflow.py <workflow-dir> --mode planned",
     }
 
@@ -373,6 +378,14 @@ def main() -> int:
         help=(
             "JSON capability inventory to snapshot when --model-routing=codex. "
             "Required for routed scaffolds."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "high", "xhigh", "max", "ultra"),
+        help=(
+            "User-selected session reasoning effort inherited unchanged by every "
+            "routed lane. Required when --model-routing=codex."
         ),
     )
     parser.add_argument(
@@ -438,12 +451,20 @@ def main() -> int:
             raise SystemExit(
                 "--runtime-capabilities is required when --model-routing=codex"
             )
-        policy_path = Path(__file__).resolve().parents[1] / "assets" / "model-routing-policy.v1.json"
+        if not args.reasoning_effort:
+            raise SystemExit(
+                "--reasoning-effort is required when --model-routing=codex; "
+                "the router may not infer or change the user's session effort"
+            )
+        policy_path = Path(__file__).resolve().parents[1] / "assets" / "model-routing-policy.v2.json"
         try:
             policy = load_policy_template(policy_path)
         except RoutingError as exc:
             raise SystemExit(f"Invalid tracked routing policy template: {exc}") from exc
-        capabilities = load_runtime_capability_input(args.runtime_capabilities)
+        capabilities = load_runtime_capability_input(
+            args.runtime_capabilities,
+            reasoning_effort=args.reasoning_effort,
+        )
         routing_context = (policy, capabilities)
     capability_evidence = args.runner_capability_evidence
     adapter = runner_adapter(
@@ -499,7 +520,6 @@ def main() -> int:
         ],
         "final_status": "pending",
     }
-
     orchestration = {
         "schema_version": "agent-loops.orchestration.v1",
         "workflow": {

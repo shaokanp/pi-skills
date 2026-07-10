@@ -53,7 +53,7 @@ Enable with `--execution-efficiency native`; absence preserves legacy behavior. 
 
 ### Opt-In Codex Model Routing
 
-Enable only with `--model-routing codex --runtime-capabilities <path>` and `codex_builtin_subagents`; other runners remain unchanged. Read `Opt-In Model Routing Artifacts` in `references/workflow-artifacts.md` before planning. Terra/high is the automatic floor, Sol/max requires evidenced escalation, planned decisions become immutable after attempts start, and required verifiers must satisfy claim-derived route, evidence, and identity gates.
+Enable only with `--model-routing codex --runtime-capabilities <path> --reasoning-effort <value>` and `codex_builtin_subagents`; other runners remain unchanged. Read the current effort from a runtime-provided setting when available, otherwise use the user's explicit statement; if neither exists, ask once instead of inferring it from the model or task. The effort is the user's session-wide choice, is locked once per workflow, and must be inherited unchanged by every routed lane. The router chooses only the model: Sol for planning, judgment, ambiguity, cross-boundary or high-risk work; Terra for bounded execution and repair packets. Read `Opt-In Model Routing Artifacts` in `references/workflow-artifacts.md` before planning. Planned decisions become immutable after attempts start, and required verifiers must satisfy claim-derived model, evidence, and identity gates.
 Availability, identities, attempts, and actual routes are lead-recorded evidence in v1, not runtime attestation. Do not dispatch until `verify_workflow.py --mode planned` passes.
 
 ### Swarm Card Display
@@ -138,7 +138,7 @@ A round is one orchestration cycle:
 4. Integration summarizes findings, conflicts, accepted work, rejected work, and repair packets.
 5. Independent `verify` and/or `challenge` decides whether the round passes, needs repair, needs more discovery/roundtable, is blocked, or requires a human gate.
 
-For routed lanes, the lead appends each dispatch result to the lane's attempt ledger before deciding on retry, fallback, escalation, repair, or a human gate. The terminal actual route comes from the final completed attempt and must equal the dispatched route; silent model or effort substitution fails validation.
+For routed lanes, the lead appends each dispatch result to the lane's attempt ledger before deciding on retry, fallback, escalation, repair, or a human gate. The terminal actual route comes from the final completed attempt and must equal the dispatched route; silent model substitution or any lane-specific effort change fails validation.
 
 Use actual subagents only through the selected native runner adapter. If the run is in Codex, use Codex's multi-agent tools directly. If the run is in Claude Code, use Claude Code's built-in subagent/agent-team surface directly. If neither native surface is available or authorized, simulate lanes sequentially in the main thread and keep their JSON outputs separate before integrating.
 

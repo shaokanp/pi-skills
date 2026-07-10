@@ -86,7 +86,7 @@ Verifier floor: {verification_floor}
 Evidence level: lead_recorded
 ```
 
-Terra/high is the automatic floor. Allowed automatic initial routes are Terra/high, Terra/xhigh, Sol/high, and Sol/xhigh; automatic Sol/max requires an evidenced escalation from Sol/xhigh. Never suggest Luna, low, medium, ultra, an unclassified model, a route below the planned minimum, or a silent model/effort substitution.
+The workflow inherits one user-selected reasoning effort and no lane may raise or lower it. Route models by responsibility: Sol decides, interprets, reviews, challenges, verifies, or handles ambiguity and high risk; Terra executes a bounded packet. Never suggest Luna, an unclassified model, a model below the planned minimum, or any lane-specific effort substitution.
 
 The lead owns snapshots and the append-only `runner-evidence.json attempts[]` ledger. Route-changing evidence must be a safe, existing, substantive workspace reference and escalation evidence must bind to the preceding failed attempt. Lanes may report outcome and evidence, but must not claim that lead-recorded capabilities, identity, lifecycle, or terminal actual route are runtime-attested or independently verified.
 
