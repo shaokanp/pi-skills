@@ -1,0 +1,27 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Run public release preflight
+        run: bash scripts/preflight.sh
+      - name: Scan complete Git history
+        env:
+          PI_SKILLS_PRIVATE_MARKERS: ${{ secrets.PI_SKILLS_PRIVATE_MARKERS }}
+        run: bash scripts/check-public.sh --history
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

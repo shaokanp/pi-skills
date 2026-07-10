@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+bash "$ROOT/scripts/validate-all.sh"
+bash "$ROOT/scripts/check-public.sh" --index --require-local-markers

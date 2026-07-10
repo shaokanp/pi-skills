@@ -1,0 +1,35 @@
+{
+  "schema_version": "pi-skills.registry.v1",
+  "skills": [
+    {
+      "id": "explain",
+      "display_name": "Explain",
+      "description": "Evidence-first explanations for technical systems, specs, diffs, workflows, and multi-round progress, using plain language and fit-for-purpose diagrams.",
+      "source": "skills/explain",
+      "production_target": "explain",
+      "version": "1.0.0",
+      "status": "stable",
+      "visibility": "public"
+    },
+    {
+      "id": "agent-workflow",
+      "display_name": "Agent Workflow",
+      "description": "Planner-first agent workflow harness with durable workflow state, lane contracts, review, challenge, verify, and iteration.",
+      "source": "skills/agent-workflow",
+      "production_target": "agent-workflow",
+      "version": "0.3.0",
+      "status": "experimental",
+      "visibility": "public"
+    },
+    {
+      "id": "write-good-goal",
+      "display_name": "Write Good Goal",
+      "description": "Write concise, feasible agent goals with auditable done criteria, follow-up gates, and bounded iteration.",
+      "source": "skills/write-good-goal",
+      "production_target": "write-good-goal",
+      "version": "1.0.0",
+      "status": "stable",
+      "visibility": "public"
+    }
+  ]
+}

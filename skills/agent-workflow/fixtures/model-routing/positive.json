@@ -1,0 +1,142 @@
+{
+  "capabilities": {
+    "adapter": "codex_builtin_subagents",
+    "dispatch_surface": "multi_agent_v1",
+    "observed_at": "2026-07-10T00:00:00Z",
+    "source": "fixture_lead_recorded_tool_schema",
+    "models": [
+      {
+        "id": "gpt-5.6-terra",
+        "available": true,
+        "classification": "general",
+        "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+        "automatic_efforts": ["high", "xhigh"]
+      },
+      {
+        "id": "gpt-5.6-sol",
+        "available": true,
+        "classification": "deep",
+        "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+        "automatic_efforts": ["high", "xhigh", "max"]
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "available": true,
+        "classification": "below_automatic_floor",
+        "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+        "automatic_efforts": []
+      },
+      {
+        "id": "gpt-5.5",
+        "available": true,
+        "classification": "unclassified",
+        "supported_efforts": ["high", "xhigh"],
+        "automatic_efforts": []
+      }
+    ]
+  },
+  "route_cases": [
+    {
+      "name": "terra_high_default",
+      "facts": {
+        "ambiguity": "bounded",
+        "coupling": "local",
+        "blast_radius": "local",
+        "reversibility": "easy",
+        "verifiability": "deterministic",
+        "novelty": "established",
+        "role": "implement",
+        "claim_class": "routine",
+        "approval_required": false
+      },
+      "expected_status": "planned",
+      "expected_route": "gpt-5.6-terra/high",
+      "expected_rule": "route.terra_high.default"
+    },
+    {
+      "name": "terra_xhigh_material",
+      "facts": {
+        "ambiguity": "material",
+        "coupling": "local",
+        "blast_radius": "shared",
+        "reversibility": "bounded_rollback",
+        "verifiability": "deterministic",
+        "novelty": "established",
+        "role": "implement",
+        "claim_class": "routine",
+        "approval_required": false
+      },
+      "expected_status": "planned",
+      "expected_route": "gpt-5.6-terra/xhigh",
+      "expected_rule": "route.terra_xhigh.material_ambiguity"
+    },
+    {
+      "name": "sol_high_high_consequence",
+      "facts": {
+        "ambiguity": "bounded",
+        "coupling": "local",
+        "blast_radius": "shared",
+        "reversibility": "bounded_rollback",
+        "verifiability": "deterministic",
+        "novelty": "established",
+        "role": "implement",
+        "claim_class": "high_consequence",
+        "approval_required": false
+      },
+      "expected_status": "planned",
+      "expected_route": "gpt-5.6-sol/high",
+      "expected_rule": "route.sol_high.high_consequence"
+    },
+    {
+      "name": "sol_xhigh_novel_cross_boundary",
+      "facts": {
+        "ambiguity": "material",
+        "coupling": "cross_boundary",
+        "blast_radius": "shared",
+        "reversibility": "bounded_rollback",
+        "verifiability": "partial",
+        "novelty": "novel",
+        "role": "plan",
+        "claim_class": "judgment",
+        "approval_required": false
+      },
+      "expected_status": "planned",
+      "expected_route": "gpt-5.6-sol/xhigh",
+      "expected_rule": "route.sol_xhigh.novel_cross_boundary"
+    },
+    {
+      "name": "sol_xhigh_high_consequence_verifier",
+      "facts": {
+        "ambiguity": "bounded",
+        "coupling": "local",
+        "blast_radius": "shared",
+        "reversibility": "bounded_rollback",
+        "verifiability": "deterministic",
+        "novelty": "established",
+        "role": "verify",
+        "claim_class": "high_consequence",
+        "approval_required": false
+      },
+      "expected_status": "planned",
+      "expected_route": "gpt-5.6-sol/xhigh",
+      "expected_rule": "route.sol_xhigh.final_high_consequence_verifier"
+    },
+    {
+      "name": "approval_human_gate",
+      "facts": {
+        "ambiguity": "bounded",
+        "coupling": "local",
+        "blast_radius": "local",
+        "reversibility": "easy",
+        "verifiability": "deterministic",
+        "novelty": "established",
+        "role": "implement",
+        "claim_class": "routine",
+        "approval_required": true
+      },
+      "expected_status": "human_gate",
+      "expected_route": null,
+      "expected_rule": "gate.approval_required"
+    }
+  ]
+}

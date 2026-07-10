@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+REMOTE_NAME="${1:-unknown}"
+REFS_FILE="$(mktemp "${TMPDIR:-/tmp}/pi-skills-pre-push.XXXXXX")"
+trap 'rm -f "$REFS_FILE"' EXIT
+
+cat >"$REFS_FILE"
+
+echo "running pi-skills public push gate for remote: $REMOTE_NAME"
+bash "$ROOT/scripts/publish-preflight.sh" --push-refs "$REFS_FILE"

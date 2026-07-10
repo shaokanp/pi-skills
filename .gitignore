@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output and caches
+dist/
+build/
+.workflow/
+.cache/
+cache/
+.wrangler/
+
+# Secrets
+.env
+.env.*
+.pi-skills.local.json
+
+# Local project overlay (materialized from the private Ops workspace)
+/AGENTS.md
+/PROJECT.md
+/release.recipe.json
+
+# Runtime state and logs
+state/
+data/
+logs/
+*.sqlite
+*.sqlite3
+*.db
+
+# Local OS/editor noise
+.DS_Store
+__pycache__/
+*.pyc

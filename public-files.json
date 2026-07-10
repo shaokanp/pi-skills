@@ -1,0 +1,43 @@
+{
+  "schema_version": "pi-skills.public-files.v1",
+  "allowed_files": [
+    ".githooks/pre-commit",
+    ".githooks/pre-push",
+    ".github/workflows/validate.yml",
+    ".gitignore",
+    ".pi-skills.local.example.json",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "docs/release.md",
+    "public-files.json",
+    "registry.json",
+    "scripts/check-public.sh",
+    "scripts/diff-production.sh",
+    "scripts/install-hooks.sh",
+    "scripts/install-skill.sh",
+    "scripts/package-all.sh",
+    "scripts/package-skill.sh",
+    "scripts/package_skill.py",
+    "scripts/preflight.sh",
+    "scripts/public_safety.py",
+    "scripts/publish-preflight.sh",
+    "scripts/release-local.sh",
+    "scripts/scan-secrets.sh",
+    "scripts/validate-all.sh",
+    "scripts/validate-skill.sh",
+    "scripts/validate_public_tree.py",
+    "tests/test_package_public_files.py",
+    "tests/test_public_safety.py"
+  ],
+  "allowed_prefixes": [
+    "skills/"
+  ],
+  "forbidden_files": [
+    ".pi-skills.local.json",
+    "AGENTS.md",
+    "PROJECT.md",
+    "release.recipe.json"
+  ]
+}

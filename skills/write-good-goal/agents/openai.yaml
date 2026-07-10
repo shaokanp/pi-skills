@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write Good Goal"
+  short_description: "Write concise, feasible goals with auditable completion gates"
+  default_prompt: "Use $write-good-goal to turn this task into a concise, executable goal."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Explain"
+  short_description: "把技術、spec、diff 與進度整理成清楚理解封包"
+  default_prompt: "Use $explain to explain this technical or spec-heavy material clearly."

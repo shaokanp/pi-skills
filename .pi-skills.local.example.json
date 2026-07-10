@@ -1,0 +1,9 @@
+{
+  "target_root": "/absolute/path/to/your/skills",
+  "validator": null,
+  "private_markers": [
+    "YOUR_PRIVATE_WORKSPACE_NAME",
+    "YOUR_PERSONAL_HANDLE",
+    "YOUR_PRIVATE_HOME_PATH"
+  ]
+}

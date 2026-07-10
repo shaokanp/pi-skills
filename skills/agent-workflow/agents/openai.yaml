@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Workflow"
+  short_description: "Planner-first multi-agent harness loop with review, challenge, verify, and iteration"
+  default_prompt: "Use $agent-workflow to plan the smallest appropriate agent workflow, show a CJK-safe left-rail Swarm Card when the display policy triggers, use native subagents only when justified and available, and record what actually ran."

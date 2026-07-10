@@ -1,0 +1,48 @@
+{
+  "policy_mutations": [
+    {"name": "free_text_predicate", "mutation": "free_text_predicate"},
+    {"name": "duplicate_priority", "mutation": "duplicate_priority"},
+    {"name": "missing_default", "mutation": "missing_default"},
+    {"name": "luna_route", "mutation": "luna_route"},
+    {"name": "medium_route", "mutation": "medium_route"},
+    {"name": "remove_approval_rule", "mutation": "remove_approval_rule"},
+    {"name": "remove_high_consequence_rule", "mutation": "remove_high_consequence_rule"},
+    {"name": "remove_external_rule", "mutation": "remove_external_rule"},
+    {"name": "remove_hard_reversal_rule", "mutation": "remove_hard_reversal_rule"},
+    {"name": "remove_judgment_rule", "mutation": "remove_judgment_rule"},
+    {"name": "disable_verifier_rules", "mutation": "disable_verifier_rules"},
+    {"name": "change_policy_id", "mutation": "change_policy_id"},
+    {"name": "change_policy_version", "mutation": "change_policy_version"},
+    {"name": "digest_mismatch", "mutation": "digest_mismatch"}
+  ],
+  "capability_mutations": [
+    {"name": "luna_automatic", "mutation": "luna_automatic"},
+    {"name": "unclassified_automatic", "mutation": "unclassified_automatic"},
+    {"name": "unsupported_automatic_effort", "mutation": "unsupported_automatic_effort"},
+    {"name": "malformed_observed_at", "mutation": "malformed_observed_at"},
+    {"name": "capability_digest_mismatch", "mutation": "digest_mismatch"}
+  ],
+  "fact_mutations": [
+    {"name": "mixed_novelty", "mutation": "mixed_novelty"},
+    {"name": "missing_blast_radius", "mutation": "missing_blast_radius"},
+    {"name": "unknown_fact", "mutation": "unknown_fact"}
+  ],
+  "attempt_mutations": [
+    {"name": "retry_changes_route", "mutation": "retry_changes_route"},
+    {"name": "retry_cap_exceeded", "mutation": "retry_cap_exceeded"},
+    {"name": "fallback_wrong_failure", "mutation": "fallback_wrong_failure"},
+    {"name": "route_unavailable_wrong_outcome", "mutation": "route_unavailable_wrong_outcome"},
+    {"name": "escalation_without_evidence", "mutation": "escalation_without_evidence"},
+    {"name": "escalation_placeholder_evidence", "mutation": "escalation_placeholder_evidence"},
+    {"name": "escalation_wrong_attempt_binding", "mutation": "escalation_wrong_attempt_binding"},
+    {"name": "route_change_cap_exceeded", "mutation": "route_change_cap_exceeded"},
+    {"name": "silent_actual_substitution", "mutation": "silent_actual_substitution"},
+    {"name": "terminal_pointer_drift", "mutation": "terminal_pointer_drift"},
+    {"name": "planned_digest_drift", "mutation": "planned_digest_drift"}
+  ],
+  "terminal_outcomes": [
+    {"outcome": "unavailable", "failure_class": "route_unavailable"},
+    {"outcome": "failed", "failure_class": "tool_failure"},
+    {"outcome": "blocked", "failure_class": "tool_failure"}
+  ]
+}
