@@ -14,6 +14,8 @@ locally and published for other people to use.
 
 `agent-workflow` is the canonical skill id. The internal `.workflow` schema
 keeps its existing `agent-loops.*` prefix for backward compatibility.
+Read the [Agent Workflow guide](skills/agent-workflow/README.md) or its
+[English version](skills/agent-workflow/README.en.md).
 
 ## Install
 

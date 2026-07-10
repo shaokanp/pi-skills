@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added Traditional Chinese and English Agent Workflow guides with architecture,
+  lane, artifact, runner-boundary, and Swarm Card examples.
 - Replaced the event-range-dependent Gitleaks Action wrapper with the official
   versioned container and an explicit full-`HEAD` history scan.
 - Replaced the fixed-width Swarm Card phase grid with a deterministic,
