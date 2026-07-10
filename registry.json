@@ -17,7 +17,7 @@
       "description": "Orchestrate agent teams and gated multi-round loops with planned lanes, durable state, challenge, verification, and repair.",
       "source": "skills/agent-workflow",
       "production_target": "agent-workflow",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "status": "experimental",
       "visibility": "public"
     },

@@ -533,6 +533,29 @@ class ModelRoutingTests(unittest.TestCase):
             self._materialize_final_contract(claude)
             self.assertVerifierPasses(claude, "final")
 
+    def test_native_execution_efficiency_is_default_with_model_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow = self._scaffold(
+                Path(temp),
+                "routed-native-default",
+                "codex_builtin_subagents",
+                lanes="implement,verify",
+                routing=True,
+                execution_efficiency=None,
+            )
+            orchestration = load_json(workflow / "orchestration.json")
+            self.assertTrue(orchestration["model_routing"]["enabled"])
+            self.assertEqual(
+                "native_default",
+                orchestration["execution_efficiency"]["activation"],
+            )
+            self.assertFalse(
+                orchestration["execution_efficiency"]["wait"]["status_polling"]
+            )
+            for lane in orchestration["rounds"][0]["lanes"]:
+                self.assertFalse(lane["runner"]["fork_context"])
+            self.assertVerifierPasses(workflow, "scaffold")
+
     def test_routed_workspace_scaffold_planned_and_executed_modes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             workflow = self._scaffold(
@@ -1537,6 +1560,7 @@ class ModelRoutingTests(unittest.TestCase):
         lanes: str = "",
         routing: bool = False,
         capability_evidence: bool = True,
+        execution_efficiency: str | None = "off",
     ) -> Path:
         workflow_root = root / "workflows"
         workflow_root.mkdir(parents=True, exist_ok=True)
@@ -1561,6 +1585,8 @@ class ModelRoutingTests(unittest.TestCase):
             command.extend(
                 ["--runner-capability-evidence", "Test harness observed the native surface."]
             )
+        if execution_efficiency is not None:
+            command.extend(["--execution-efficiency", execution_efficiency])
         if routing:
             capability_input = root / f"{slug}-capabilities.json"
             capabilities = copy.deepcopy(self.positive["capabilities"])

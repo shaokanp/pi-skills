@@ -221,10 +221,12 @@ Codex does not shell out to Claude Code, and Claude Code does not shell out to
 Codex. Scripts handle scaffolding, digests, receipts, rendering, and validation;
 they do not spawn agents.
 
-## Optional Hardening
+## Runtime Protections and Optional Hardening
 
-- **Execution efficiency**: isolated lane context, digest-bound dispatch,
-  notification-first waits, compact receipts, budgets, and independent identities.
+- **Execution efficiency (native default)**: Codex and Claude Code native workflows
+  automatically use isolated lane context, digest-bound dispatch, notification-first
+  waits, compact receipts, budgets, and independent identities; `off` is only an
+  explicit rollback.
 - **Codex model routing v2**: Sol handles planning, judgment, review, challenge,
   verification, and high-risk work; Terra handles bounded execution. The user's
   session reasoning effort is inherited across the workflow, and the router

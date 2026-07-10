@@ -464,17 +464,16 @@ For `custom`, the lane object must define:
 - `output_schema`
 - `gate`
 
-## Opt-In Execution-Efficiency Artifacts
+## Default Native Execution-Efficiency Artifacts
 
-Execution efficiency extends the existing v1 workspace only when
-`orchestration.execution_efficiency.enabled` is exactly `true`. Scaffold it
-with a native runner:
+Execution efficiency extends new native v1 workspaces automatically when
+`orchestration.execution_efficiency.enabled` is exactly `true`. Scaffold with
+a native runner; no opt-in flag is required:
 
 ```bash
 python3 scripts/new_workflow.py "Efficient native workflow" \
   --runner-mode codex_builtin_subagents \
   --runner-capability-evidence "Observed multi_agent_v1 in this session." \
-  --execution-efficiency native \
   --lanes discover,implement,review,verify
 ```
 
@@ -484,7 +483,7 @@ The policy declares the mechanism and rollback boundary:
 {
   "schema_version": "agent-workflow.execution-efficiency.v1",
   "enabled": true,
-  "activation": "explicit_opt_in",
+  "activation": "native_default",
   "risk_class": "medium",
   "context": {
     "default_mode": "isolated",
@@ -537,7 +536,7 @@ Each enabled lane gains an immutable execution contract. Codex lanes also set
 Execution-efficiency v1 requires `agent_count: 1` for each lane; create distinct
 lane IDs when several independent opinions are needed.
 
-The opt-in orchestration also records a portable
+The default native orchestration also records a portable
 `workflow.workspace_root` relative to the run directory. During dispatch
 preparation, each lane `input_refs` entry becomes a file-bound object:
 
@@ -703,8 +702,10 @@ registered runner identities, and one wave cannot include two aliases for the
 same record. Final runtime evidence must cover every recorded agent identity as
 terminal, not merely as a wait target.
 
-Disable or remove this opt-in block to return to prior v1 behavior. No artifact
-migration is required, and the extra lane fields remain harmless optional data.
+Scaffold with `--execution-efficiency off`, or disable/remove this block, only
+when an explicit compatibility rollback to prior v1 behavior is required. No
+artifact migration is required, and existing `explicit_opt_in` policies remain
+valid for already-created workspaces.
 
 ## Opt-In Model Routing Artifacts
 

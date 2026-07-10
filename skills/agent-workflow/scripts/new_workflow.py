@@ -365,12 +365,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--execution-efficiency",
-        choices=("off", "native"),
-        default="off",
+        choices=("auto", "off", "native"),
+        default="auto",
         help=(
-            "Explicitly opt in to isolated native dispatch, notification-first waits, "
-            "compact receipts, admission gates, and execution budgets. Default off "
-            "preserves legacy v1 behavior."
+            "Control isolated native dispatch, notification-first waits, compact "
+            "receipts, admission gates, and execution budgets. Default auto enables "
+            "the policy for native Codex and Claude Code runners and leaves manual "
+            "simulation unchanged; off is an explicit compatibility rollback."
         ),
     )
     parser.add_argument(
@@ -434,11 +435,14 @@ def main() -> int:
     lanes = parse_lanes(args.lanes)
     resolved_runner_mode = resolve_runner_mode(args.runner_mode)
     execution_policy: dict[str, object] | None = None
-    if args.execution_efficiency == "native":
-        if resolved_runner_mode == "manual_simulation":
-            raise SystemExit(
-                "--execution-efficiency=native requires a native Codex or Claude Code runner"
-            )
+    if (
+        args.execution_efficiency == "native"
+        and resolved_runner_mode == "manual_simulation"
+    ):
+        raise SystemExit(
+            "--execution-efficiency=native requires a native Codex or Claude Code runner"
+        )
+    if resolved_runner_mode != "manual_simulation" and args.execution_efficiency != "off":
         execution_policy = build_execution_policy(resolved_runner_mode)
         (round_dir / "receipts").mkdir(parents=True, exist_ok=True)
     routing_context: tuple[dict[str, object], dict[str, object]] | None = None

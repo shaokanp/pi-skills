@@ -47,9 +47,9 @@ Runner rules:
 New workspaces use fail-closed `agent-workflow.token-usage.v2`. Before the first dispatch, read the `token-usage.json` section of `references/workflow-artifacts.md` and follow its start, per-spawn registration, terminal-agent, and accounting-only finalize sequence exactly. Perform no workflow work after finalization.
 Never label Lead counters, estimates, or incomplete runtime events as exact; final reports describe runtime-session-event deltas as lead-recorded provenance, not independent billing attestation.
 
-### Opt-In Execution Efficiency
+### Default Native Execution Efficiency
 
-Enable with `--execution-efficiency native`; absence preserves legacy behavior. Before using it, read `Opt-In Execution-Efficiency Artifacts` in `references/workflow-artifacts.md` and follow lane admission, isolated context, digest-bound dispatch, notification-first waits, receipt transport, budgets, identity independence, and planned/executed/final validation. Disable the block to roll back without artifact migration.
+New Codex and Claude Code native workflows enable execution efficiency automatically; manual simulation and existing workspaces remain unchanged. Read `Default Native Execution-Efficiency Artifacts` in `references/workflow-artifacts.md` and follow lane admission, isolated context, digest-bound dispatch, notification-first waits, receipt transport, budgets, identity independence, and planned/executed/final validation. Use `--execution-efficiency off` only as an explicit compatibility rollback; no artifact migration is required.
 
 ### Opt-In Codex Model Routing
 

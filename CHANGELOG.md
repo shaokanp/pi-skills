@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fixed the execution-efficiency activation bug: new Codex and Claude Code
+  native workflows now use isolated context, notification-first waits, compact
+  receipts, and budgets by default instead of requiring an opt-in flag.
+- Kept manual simulation unchanged, retained `off` as an explicit compatibility
+  rollback, and continued validating existing `explicit_opt_in` workspaces.
 - Reworked all three skill descriptions around distinct trigger branches and
   explicit routing boundaries between explanation, goal drafting, multi-agent
   execution, and ordinary direct work.
@@ -36,7 +41,7 @@
   fail-closed coverage/arithmetic validation.
 - Kept legacy v1 estimates readable while rejecting v1 documents that claim
   exact runtime usage without start/end evidence.
-- Added an opt-in execution-efficiency contract for native Agent Workflow runs.
+- Added an execution-efficiency contract for native Agent Workflow runs.
 - Added isolated Codex/Claude lane contexts, digest-bound dispatch preparation,
   notification-first long-wait telemetry, compact receipts and integration
   indexes, lane-admission and quality gates, per-agent budgets, bounded writer
@@ -44,8 +49,8 @@
 - Added deterministic regressions for busy polling, unresolved timeout, card
   heartbeat, dispatch/output tampering, deterministic lane admission, repair
   affinity, Codex/Claude/manual runners, and legacy v1 compatibility.
-- Kept execution efficiency disabled by default so existing v1 workspaces and
-  manual simulations require no migration.
+- Enabled execution efficiency by default for new native scaffolds while keeping
+  existing v1 workspaces and manual simulations migration-free.
 - Added opt-in Codex model routing with persisted policy and capability
   snapshots, immutable per-attempt route evidence, and claim-derived verifier
   floors.

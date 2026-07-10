@@ -99,7 +99,7 @@ Expected behavior:
 - Use `scripts/verify_workflow.py --mode final` before any final claim.
 - Remember that scripts do not spawn agents.
 
-## Opt-In Native Execution Efficiency
+## Default Native Execution Efficiency
 
 Prompt:
 
@@ -109,9 +109,10 @@ Use an agent workflow, isolate every subagent context, avoid polling turns, and 
 
 Expected behavior:
 
-- Enable only with `--execution-efficiency native` plus a Codex or Claude Code
-  native runner. Manual simulation and existing v1 workspaces remain unchanged
-  when the block is absent.
+- New Codex and Claude Code native scaffolds enable the policy automatically.
+  Manual simulation and existing v1 workspaces remain unchanged when the block
+  is absent. Use `--execution-efficiency off` only for an explicit compatibility
+  rollback; `--execution-efficiency native` may still assert native-only intent.
 - Keep planning and integration lead-owned. Require an explicit exception for a
   separate plan lane, enable seam only for real boundary risk, reject duplicate
   lane questions, use one agent per efficiency lane, and execute deterministic

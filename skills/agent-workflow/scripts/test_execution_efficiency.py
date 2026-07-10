@@ -55,7 +55,7 @@ class ExecutionEfficiencyTests(unittest.TestCase):
         runner_mode: str,
         *,
         lanes: str = "discover,verify",
-        efficiency: bool = True,
+        efficiency: str | None = None,
     ) -> Path:
         workflow_root = root / "workflows"
         command = [
@@ -77,8 +77,8 @@ class ExecutionEfficiencyTests(unittest.TestCase):
                     "Fixture observed the native subagent surface.",
                 ]
             )
-        if efficiency:
-            command.extend(["--execution-efficiency", "native"])
+        if efficiency is not None:
+            command.extend(["--execution-efficiency", efficiency])
         result = run_command(*command)
         self.assertEqual(0, result.returncode, result.stdout)
         return workflow_root / new_workflow.slugify(slug)
@@ -184,7 +184,7 @@ class ExecutionEfficiencyTests(unittest.TestCase):
             },
         )
 
-    def test_codex_and_claude_scaffolds_are_explicitly_isolated(self) -> None:
+    def test_native_scaffolds_default_to_isolated_efficiency(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             for mode in (
@@ -194,6 +194,10 @@ class ExecutionEfficiencyTests(unittest.TestCase):
                 with self.subTest(mode=mode):
                     workflow = self.scaffold(root, mode, mode)
                     orchestration = load_json(workflow / "orchestration.json")
+                    self.assertEqual(
+                        "native_default",
+                        orchestration["execution_efficiency"]["activation"],
+                    )
                     context = orchestration["execution_efficiency"]["context"]
                     self.assertFalse(context["lead_fork_context"])
                     self.assertFalse(context["lane_fork_context"])
@@ -205,6 +209,19 @@ class ExecutionEfficiencyTests(unittest.TestCase):
                     result = run_command(str(VERIFY_WORKFLOW), str(workflow), "--mode", "scaffold")
                     self.assertEqual(0, result.returncode, result.stdout)
 
+    def test_native_default_accepts_existing_explicit_opt_in_policies(self) -> None:
+        policy = execution_efficiency.build_execution_policy("codex_builtin_subagents")
+        self.assertEqual("native_default", policy["activation"])
+        execution_efficiency.validate_execution_policy(
+            policy, "codex_builtin_subagents"
+        )
+
+        existing = copy.deepcopy(policy)
+        existing["activation"] = "explicit_opt_in"
+        execution_efficiency.validate_execution_policy(
+            existing, "codex_builtin_subagents"
+        )
+
     def test_manual_and_legacy_workflows_remain_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -212,7 +229,6 @@ class ExecutionEfficiencyTests(unittest.TestCase):
                 root,
                 "manual-off",
                 "manual_simulation",
-                efficiency=False,
             )
             self.assertNotIn("execution_efficiency", load_json(manual / "orchestration.json"))
             result = run_command(str(VERIFY_WORKFLOW), str(manual), "--mode", "scaffold")
@@ -254,6 +270,16 @@ class ExecutionEfficiencyTests(unittest.TestCase):
             self.assertEqual(0, collected.returncode, collected.stdout)
             self.assertIn("Legacy Markdown Results", collected.stdout)
 
+            native_off = self.scaffold(
+                root,
+                "native-off",
+                "codex_builtin_subagents",
+                efficiency="off",
+            )
+            self.assertNotIn(
+                "execution_efficiency", load_json(native_off / "orchestration.json")
+            )
+
     def test_disabled_policy_and_exact_runner_bindings(self) -> None:
         policy = execution_efficiency.build_execution_policy("codex_builtin_subagents")
         policy["enabled"] = False
@@ -276,7 +302,7 @@ class ExecutionEfficiencyTests(unittest.TestCase):
                 Path(temp),
                 "runner-binding",
                 "codex_builtin_subagents",
-                efficiency=False,
+                efficiency="off",
             )
             state = load_json(workflow / "state.json")
             orchestration_file = load_json(workflow / "orchestration.json")

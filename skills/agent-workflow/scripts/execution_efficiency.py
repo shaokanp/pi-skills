@@ -181,7 +181,7 @@ def build_execution_policy(runner_mode: str) -> dict[str, Any]:
     return {
         "schema_version": POLICY_SCHEMA,
         "enabled": True,
-        "activation": "explicit_opt_in",
+        "activation": "native_default",
         "risk_class": "medium",
         "context": {
             "default_mode": "isolated",
@@ -251,9 +251,12 @@ def validate_execution_policy(value: Any, runner_mode: str) -> dict[str, Any]:
         raise ExecutionEfficiencyError(
             f"execution_efficiency.schema_version must be {POLICY_SCHEMA}"
         )
-    if policy["enabled"] is not True or policy["activation"] != "explicit_opt_in":
+    if policy["enabled"] is not True or policy["activation"] not in {
+        "native_default",
+        "explicit_opt_in",
+    }:
         raise ExecutionEfficiencyError(
-            "execution_efficiency must be enabled through explicit_opt_in"
+            "execution_efficiency activation must be native_default or explicit_opt_in"
         )
     if runner_mode not in NATIVE_RUNNERS:
         raise ExecutionEfficiencyError(
