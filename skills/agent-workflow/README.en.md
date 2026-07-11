@@ -3,16 +3,16 @@
 [繁體中文](./README.md) | English
 
 Give Agent Workflow a goal that needs multiple agents, independent quality
-checks, or multi-round repair. A Lead Agent selects the team, lanes, gates, and
-stop conditions before coordinating execution, integration, and the quality
-lanes that apply; repair opens only when a gate fails. A passing run delivers
-the work. A human-gated, blocked, or budget-limited run reports the proven state,
-stop reason, and resume condition.
+checks, or multi-round repair. New native Codex runs do not fan workers out from
+Main. Main creates one clean `fork_turns=none` Orchestrator; that Orchestrator
+selects the team, lanes, sealed gates, completion budgets, and stop conditions
+before coordinating nested workers, integration, and quality lanes.
 
-When the runtime exposes native subagents, the Lead creates a real agent team.
-Otherwise it can only run an explicitly labeled sequential simulation and must
-not claim that subagents ran. This is a Lead-executed harness inside the current
-agent runtime, not an unattended runner daemon.
+When the runtime exposes native subagents and capability admission passes, the
+Orchestrator creates a real agent team. Missing target primitives permit only an
+explicitly bounded `bounded_interim` path, or fail closed before spawn. Without
+native authority, the Lead can only run an explicitly labeled sequential
+simulation and must not claim that subagents ran.
 
 ## When To Use It
 
@@ -76,10 +76,12 @@ constraints:
 
 ```mermaid
 flowchart TD
-    Goal["Goal and done criteria"] --> Lead["Lead Orchestrator"]
-    Lead --> Compile["Compile workflow plan"]
-    Compile --> Lanes["Select lanes and agents dynamically"]
-    Lanes --> Work["Discover / Plan / Implement / Roundtable / Seam"]
+    Goal["Goal and done criteria"] --> Main["Main Agent"]
+    Main --> Clean["Single Clean Orchestrator"]
+    Clean --> Lanes["Select nested lanes dynamically"]
+    Lanes --> Compile["Compile sealed workflow plan"]
+    Compile --> Controller["Validate / collect / render / accounting"]
+    Controller --> Work["Discover / Plan / Implement / Roundtable / Seam"]
     Work --> Integrate["Lead integration"]
     Integrate --> Assess["Review / Challenge / Verify"]
     Assess -->|"Pass"| Report["Final report + exact tokens"]
@@ -88,7 +90,9 @@ flowchart TD
     Assess -->|"Missing evidence or judgment"| Gate["More discovery / Human gate / Blocked"]
 ```
 
-The Lead Agent owns orchestration, integration, final writes, and final claims.
+The clean Orchestrator is the workflow Lead and owns orchestration, integration,
+final writes, and final claims. Main does not manage workers or receive nested
+worker events.
 Integration is not a separate worker lane in v1, so the final responsibility
 does not drift to another agent without the full picture.
 
@@ -227,6 +231,16 @@ they do not spawn agents.
   automatically use isolated lane context, digest-bound dispatch, notification-first
   waits, compact receipts, budgets, and independent identities; `off` is only an
   explicit rollback.
+- **Clean Orchestrator (native Codex default)**: Main has one clean child, and
+  every round seals its semantic gate graph, compound operation, and absolute
+  completion budget before dispatch. `target` requires the atomic outer
+  primitive, a true all-terminal barrier, and terminal host finalization;
+  missing capabilities may use only an admission-bounded `bounded_interim`,
+  never Main-led fan-out or wrapper polling.
+- **Portable controller**: `workflow_controller.py` compounds prepare, collect,
+  render, validate, and exact-accounting housekeeping into typed receipts. It
+  does not spawn, join, queue, or rotate native agents and does not claim host
+  atomicity.
 - **Codex model routing v2**: Sol handles planning, judgment, review, challenge,
   verification, and high-risk work; Terra handles bounded execution. The user's
   session reasoning effort is inherited across the workflow, and the router
@@ -235,6 +249,10 @@ they do not spawn agents.
   native runtime session events and stores Lead-recorded provenance bound to the
   event evidence. Missing evidence fails closed instead of being replaced by an
   estimate labeled exact.
+- **Raw completion replay**: `runtime_harness.py` reopens the sealed runtime
+  JSONL prefix and derives each input context, completion class, round density,
+  and forbidden wake count. `runner-evidence.json` is only a digest-bound
+  projection and cannot override raw truth.
 
 ## Detailed Specifications
 
@@ -247,8 +265,9 @@ they do not spawn agents.
 
 ## Boundary
 
-Agent Workflow is a Lead-executed harness, not an unattended runner daemon. It
-does not provide a background scheduler, queue, database, cross-runtime CLI
-bridge, or independent provider attestation. Lead-recorded lifecycle and routing
-evidence are labeled honestly and are never presented as third-party-signed
-execution proof.
+Agent Workflow is not an unattended runner daemon. Portable source does not
+provide atomic `run_orchestrator`, a durable all-terminal barrier, a native
+queue, generation rotation, terminal host finalization, a background scheduler,
+a database, a cross-runtime CLI bridge, or independent provider attestation.
+Those capabilities require host evidence; otherwise the run is explicitly
+`bounded_interim` or rejected.

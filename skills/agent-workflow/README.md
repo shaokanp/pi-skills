@@ -2,14 +2,15 @@
 
 繁體中文 | [English](./README.en.md)
 
-把一個需要多個 agents、獨立品質檢查或多輪修復的目標交給 Agent Workflow，Lead
-Agent 會先選擇 team、lanes、gates 與停止條件，再協調執行、整合與適用的品質 lanes；
-只有 gate 失敗時才開 repair round。通過時交付工作結果；若停在 human gate、blocker
-或 round budget，則交付已證明的 state、停止原因與 resume condition。
+把一個需要多個 agents、獨立品質檢查或多輪修復的目標交給 Agent Workflow。新的
+Codex native 預設不是由 Main 直接 fan-out：Main 只建立一個 `fork_turns=none` 的 clean
+Orchestrator；Orchestrator 先選擇 team、lanes、sealed gates、completion budgets 與停止
+條件，再協調 nested workers、整合與品質 lanes。只有 gate 失敗時才開 repair round。
 
-有 native subagent surface 時，它會建立真正的 agent team；沒有或未獲授權時，Lead
-只能執行明確標示的 sequential simulation，不能宣稱 subagent 曾執行。它是目前
-agent runtime 內由 Lead 執行的 harness，不是 unattended runner daemon。
+有 native subagent surface 且 capability admission 通過時，它會建立真正的 agent
+team；能力不足時只能走明確有界的 `bounded_interim`，或在 spawn 前 fail closed。
+沒有或未獲授權時，Lead 只能執行明確標示的 sequential simulation，不能宣稱
+subagent 曾執行。它不是 unattended runner daemon。
 
 ## 何時適合使用
 
@@ -69,10 +70,12 @@ and iterate until independent verification passes.
 
 ```mermaid
 flowchart TD
-    Goal["目標與完成條件"] --> Lead["Lead Orchestrator"]
-    Lead --> Compile["編譯 workflow plan"]
-    Compile --> Lanes["動態選擇 lanes 與 agents"]
-    Lanes --> Work["Discover / Plan / Implement / Roundtable / Seam"]
+    Goal["目標與完成條件"] --> Main["Main Agent"]
+    Main --> Clean["Single Clean Orchestrator"]
+    Clean --> Lanes["動態選擇 nested lanes"]
+    Lanes --> Compile["編譯 sealed workflow plan"]
+    Compile --> Controller["Validate / collect / render / accounting"]
+    Controller --> Work["Discover / Plan / Implement / Roundtable / Seam"]
     Work --> Integrate["Lead integration"]
     Integrate --> Assess["Review / Challenge / Verify"]
     Assess -->|"Pass"| Report["Final report + exact tokens"]
@@ -81,7 +84,8 @@ flowchart TD
     Assess -->|"缺資料或需判斷"| Gate["More discovery / Human gate / Blocked"]
 ```
 
-Lead Agent 是 orchestration、integration、最終寫入與最終 claims 的 owner。
+Clean Orchestrator 是 workflow 內 orchestration、integration、最終寫入與最終 claims
+的 Lead；Main 不直接管理 workers，也不接收 nested worker events。
 Integration 在 v1 不是獨立 worker lane，避免把最後責任交給另一個無法統合全局的
 agent。
 
@@ -216,12 +220,23 @@ Codex 不會用 CLI 喚起 Claude Code，Claude Code 也不會用 CLI 喚起 Cod
 - **Execution efficiency（native 預設）**：Codex／Claude Code native workflow
   自動使用 isolated lane context、digest-bound dispatch、notification-first waits、
   compact receipts、budgets 與 independent identities；`off` 僅供明確 rollback。
+- **Clean Orchestrator（Codex native 預設）**：Main 只有一個 clean child；每輪在
+  dispatch 前封存 semantic gate graph、compound operation 與 absolute completion
+  budget。`target` 要求 atomic outer primitive、true all-terminal barrier 與 terminal
+  host finalization；缺能力時只能用 admission-bound 的 `bounded_interim`，不能退回
+  Main-led fan-out 或 wrapper polling。
+- **Portable controller**：`workflow_controller.py` 將 prepare、collect、render、
+  validate 與 exact-accounting housekeeping 收進 typed compound receipts，但不 spawn、
+  join、queue 或 rotate native agents，也不冒充 host atomicity。
 - **Codex model routing v2**：Sol 負責 planning、judgment、review、challenge、verify
   與高風險工作；Terra 負責 bounded execution。Reasoning effort 由使用者 session
   選定後整個 workflow 繼承，router 不會替每個 lane 任意切換 effort。
 - **Exact token accounting**：從 native runtime session events 計算 Lead 與所有
   registered attempts，並保存綁定 event evidence 的 Lead-recorded provenance；無法取得
   完整 evidence 時 fail closed，不用估算值冒充 exact。
+- **Raw completion replay**：`runtime_harness.py` 重新開啟 sealed runtime JSONL prefix，
+  逐次產生 input context、completion class、round density 與 forbidden wake 計數；
+  `runner-evidence.json` 只是 digest-bound projection，不能自填覆蓋 raw truth。
 
 ## 詳細規格
 
@@ -234,7 +249,8 @@ Codex 不會用 CLI 喚起 Claude Code，Claude Code 也不會用 CLI 喚起 Cod
 
 ## 邊界
 
-Agent Workflow 是由 Lead Agent 執行的 harness，不是 unattended runner daemon。
-它不提供背景 scheduler、queue、database、跨 runtime CLI bridge 或獨立的 provider
-attestation。Lead-recorded lifecycle 與 routing evidence 會被誠實標示，不會被描述成
-第三方簽署的執行證明。
+Agent Workflow 不是 unattended runner daemon。Portable source 不提供 atomic
+`run_orchestrator`、durable all-terminal barrier、native queue、generation rotation、
+terminal host finalization、背景 scheduler、database、跨 runtime CLI bridge 或獨立
+provider attestation。這些能力必須由 host attestation 通過；否則明確標示
+`bounded_interim` 或 fail closed。

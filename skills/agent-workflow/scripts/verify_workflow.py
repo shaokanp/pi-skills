@@ -4,11 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any
 
+from clean_orchestrator import (
+    CLEAN_RUNTIME_SCHEMA,
+    CleanOrchestratorError,
+    validate_clean_runtime_contract,
+    validate_completion_density,
+)
 from execution_efficiency import (
     ExecutionEfficiencyError,
     RECEIPT_PAYLOAD_KEYS,
@@ -30,6 +37,7 @@ from model_routing import (
     validate_planned_decision,
     validate_policy_snapshot,
 )
+from runtime_harness import RuntimeHarnessError, validate_artifact as validate_runtime_observations
 from render_swarm_card import (
     CARD_SCHEMA,
     LEGACY_CARD_SCHEMA,
@@ -37,6 +45,62 @@ from render_swarm_card import (
     validate_card,
 )
 from token_accounting import TOKEN_USAGE_SCHEMA, validate_v2
+
+
+TERMINAL_PROJECTIONS = (
+    "token-usage.json",
+    "token-evidence.json",
+    "runtime-observations.json",
+    "runner-evidence.json",
+    "final-report.md",
+)
+
+
+def validate_terminal_commit_manifest(
+    workflow_dir: Path,
+    failures: list[str],
+    mode: str,
+    *,
+    required: bool = True,
+) -> None:
+    if mode != "final":
+        return
+    path = workflow_dir / "terminal-commit.json"
+    if not path.is_file():
+        if required:
+            failures.append("Missing terminal-commit.json manifest-last revision")
+        return
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        failures.append(f"Invalid terminal-commit.json: {exc}")
+        return
+    if not isinstance(value, dict):
+        failures.append("terminal-commit.json must be an object")
+        return
+    if value.get("schema_version") != "agent-workflow.terminal-commit.v1":
+        failures.append("terminal-commit.json schema_version is invalid")
+    if value.get("status") != "committed":
+        failures.append("terminal-commit.json status must be committed")
+    projections = value.get("projections")
+    if not isinstance(projections, dict) or set(projections) != set(TERMINAL_PROJECTIONS):
+        failures.append("terminal-commit.json must bind exactly the five terminal projections")
+        return
+    actual: dict[str, str] = {}
+    for name in TERMINAL_PROJECTIONS:
+        projection = workflow_dir / name
+        if not projection.is_file():
+            failures.append(f"terminal-commit projection is missing: {name}")
+            continue
+        actual[name] = "sha256:" + hashlib.sha256(projection.read_bytes()).hexdigest()
+        if projections.get(name) != actual[name]:
+            failures.append(f"terminal-commit mixed revision detected: {name}")
+    if len(actual) == len(TERMINAL_PROJECTIONS):
+        revision = "sha256:" + hashlib.sha256(
+            json.dumps(actual, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if value.get("revision") != revision:
+            failures.append("terminal-commit revision digest mismatch")
 
 
 REQUIRED_V1_FILES = (
@@ -1158,6 +1222,17 @@ def validate_token_usage(workflow_dir: Path, failures: list[str], mode: str) -> 
     value = load_json(path, failures)
     if isinstance(value, dict) and value.get("schema_version") == TOKEN_USAGE_SCHEMA:
         failures.extend(validate_v2(value, workflow_dir, final=mode == "final"))
+        accounting = value.get("accounting")
+        if mode == "planned" and isinstance(accounting, dict):
+            if accounting.get("started_at") is not None:
+                failures.append(
+                    f"{path}.accounting must remain unstarted in planned mode; "
+                    "use workflow_controller.py start for the boundary"
+                )
+            if accounting.get("participants") not in ([], None):
+                failures.append(
+                    f"{path}.accounting.participants must be empty in planned mode"
+                )
         return value
     require_keys(
         value,
@@ -2309,6 +2384,7 @@ def validate_execution_efficiency_contract(
             policy,
             allow_draft=mode == "scaffold",
             workflow_dir=workflow_dir,
+            allow_terminal_input_drift=mode in EXECUTION_MODES,
         )
     except ExecutionEfficiencyError as exc:
         failures.append(f"execution_efficiency contract: {exc}")
@@ -2461,7 +2537,11 @@ def validate_integration(path: Path, round_id: str, failures: list[str]) -> dict
     return integration
 
 
-def final_report_has_substance(path: Path) -> bool:
+def final_report_has_substance(
+    path: Path,
+    *,
+    allow_exact_token_markers: bool = False,
+) -> bool:
     workflow_dir = path.parent
     try:
         text = path.read_text(encoding="utf-8")
@@ -2514,7 +2594,17 @@ def final_report_has_substance(path: Path) -> bool:
     if not all(section_matches(group) for group in FINAL_REPORT_REQUIRED_SECTIONS):
         return False
     token_body = section_body(("token", "tokens", "token usage", "消耗"))
-    if not final_report_token_usage_matches(workflow_dir, token_body):
+    if allow_exact_token_markers:
+        if not all(
+            marker in token_body
+            for marker in (
+                "{{WORKFLOW_TOTAL_TOKENS}}",
+                "{{WORKFLOW_TOKEN_SOURCE}}",
+                "{{WORKFLOW_TOKEN_CONFIDENCE}}",
+            )
+        ):
+            return False
+    elif not final_report_token_usage_matches(workflow_dir, token_body):
         return False
     level = runner_evidence_level(workflow_dir)
     if level == "lead_recorded":
@@ -2861,6 +2951,40 @@ def final_report_has_substance(path: Path) -> bool:
         return False
     evidence_anchor_count = sum(1 for anchor in FINAL_REPORT_EVIDENCE_ANCHORS if anchor in lowered)
     return evidence_anchor_count >= 3
+
+
+def validate_terminal_candidate_template(workflow_dir: Path) -> list[str]:
+    """Pre-boundary gate for terminal enums and authoritative report substance."""
+
+    failures: list[str] = []
+    try:
+        state = json.loads((workflow_dir / "state.json").read_text(encoding="utf-8"))
+        (workflow_dir / "final-report.md").read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"terminal template is unreadable: {exc}"]
+    if not isinstance(state, dict):
+        return ["terminal template state must be an object"]
+    if state.get("status") != "complete":
+        failures.append('terminal template requires state.status="complete"')
+    if state.get("final_status") != "complete":
+        failures.append('terminal template requires state.final_status="complete"')
+    rounds = state.get("rounds")
+    if not isinstance(rounds, list) or not rounds:
+        failures.append("terminal template requires at least one round state")
+    else:
+        for index, round_state in enumerate(rounds, start=1):
+            if not isinstance(round_state, dict) or round_state.get("status") != "complete":
+                failures.append(
+                    f'terminal template requires state.rounds[{index}].status="complete"'
+                )
+    if not final_report_has_substance(
+        workflow_dir / "final-report.md",
+        allow_exact_token_markers=True,
+    ):
+        failures.append(
+            "terminal template report failed authoritative final-report substance validation"
+        )
+    return failures
 
 
 def planned_lane_specs(orchestration: dict[str, Any] | None) -> dict[str, dict[str, dict[str, Any]]]:
@@ -4051,6 +4175,21 @@ def validate_v1(workflow_dir: Path, mode: str, require_lane_runs: bool) -> list[
         if (workflow_dir / "orchestration.json").is_file()
         else None
     )
+    clean_runtime = None
+    if isinstance(orchestration, dict):
+        runtime_contract = state.get("runtime_contract") if isinstance(state, dict) else None
+        clean_required = (
+            isinstance(runtime_contract, dict)
+            and runtime_contract.get("required_schema") == CLEAN_RUNTIME_SCHEMA
+        )
+        try:
+            clean_runtime = validate_clean_runtime_contract(
+                orchestration,
+                allow_draft=mode == "scaffold",
+                required=clean_required,
+            )
+        except CleanOrchestratorError as exc:
+            failures.append(f"clean orchestrator runtime: {exc}")
     execution_policy, efficiency_lanes = validate_execution_efficiency_contract(
         workflow_dir,
         orchestration,
@@ -4066,6 +4205,26 @@ def validate_v1(workflow_dir: Path, mode: str, require_lane_runs: bool) -> list[
     expected_lanes = planned_lane_specs(orchestration)
     validate_progress_consistency(state, orchestration, expected_lanes, failures, mode)
     lifecycle_evidence = runner_evidence_by_lane(workflow_dir, mode, state, orchestration, failures)
+    if clean_runtime is not None and mode in EXECUTION_MODES:
+        try:
+            runner_value = json.loads(
+                (workflow_dir / "runner-evidence.json").read_text(encoding="utf-8")
+            )
+            validate_completion_density(
+                runner_value.get("completion_density"),
+                orchestration,
+                final=mode == "final",
+            )
+        except (OSError, json.JSONDecodeError, CleanOrchestratorError) as exc:
+            failures.append(f"clean orchestrator completion density: {exc}")
+        if mode == "final" or (workflow_dir / "runtime-observations.json").is_file():
+            try:
+                validate_runtime_observations(
+                    workflow_dir,
+                    final=mode == "final",
+                )
+            except RuntimeHarnessError as exc:
+                failures.append(f"clean orchestrator raw runtime observations: {exc}")
     validate_token_participant_coverage(token_usage, lifecycle_evidence, mode, failures)
     validate_execution_efficiency_runtime(
         workflow_dir,
@@ -4224,6 +4383,12 @@ def validate_v1(workflow_dir: Path, mode: str, require_lane_runs: bool) -> list[
         mode,
         failures,
     )
+    validate_terminal_commit_manifest(
+        workflow_dir,
+        failures,
+        mode,
+        required=clean_runtime is not None,
+    )
 
     return failures
 
@@ -4263,7 +4428,7 @@ def main() -> int:
     parser.add_argument("workflow_dir", help="Path to .workflow/<slug>")
     parser.add_argument(
         "--mode",
-        choices=("scaffold", "planned", "executed", "final"),
+        choices=("scaffold", "planned", "executed", "final", "terminal-template"),
         help=(
             "Validation strictness for v1 workspaces. Required for v1 unless "
             "--require-lane-runs is used, which maps to executed for compatibility. "
@@ -4282,6 +4447,16 @@ def main() -> int:
 
     workflow_dir = Path(args.workflow_dir)
     if (workflow_dir / "orchestration.json").is_file():
+        if args.mode == "terminal-template":
+            failures = validate_terminal_candidate_template(workflow_dir)
+            mode = "v1/terminal-template"
+            if failures:
+                print("Workflow verification failed:")
+                for failure in failures:
+                    print(f"- {failure}")
+                return 1
+            print(f"Workflow verification passed ({mode}): {workflow_dir}")
+            return 0
         if args.mode:
             validation_mode = args.mode
         elif args.require_lane_runs:

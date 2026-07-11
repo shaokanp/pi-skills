@@ -14,10 +14,12 @@ New run workspaces use this shape:
 |-- state.json
 |-- token-usage.json      # total workflow token usage for final summary
 |-- token-evidence.json   # native session usage snapshots for token-usage v2
+|-- accounting-start.json # pre-boundary participant attempt declarations
 |-- orchestration.md
 |-- orchestration.json
 |-- routing-policy.json   # optional immutable routing policy snapshot
 |-- runtime-capabilities.json # optional lead-recorded capability snapshot
+|-- controller-receipts/  # typed source-owned compound-operation receipts
 |-- swarm-card.json        # optional user-visible display state
 |-- rounds/
 |   `-- round-001/
@@ -464,6 +466,291 @@ For `custom`, the lane object must define:
 - `output_schema`
 - `gate`
 
+## Clean Orchestrator Runtime Artifacts
+
+New `codex_builtin_subagents` workspaces with native execution efficiency add an
+orthogonal `clean_orchestrator_runtime` block. Its activation is
+`native_default`; model routing remains separately opt-in. Existing workspaces,
+manual simulation, Claude Code, and explicit execution-efficiency rollback keep
+their prior compatibility paths.
+
+The default topology is:
+
+```text
+Main -> one clean Orchestrator (fork_turns=none) -> nested workers
+```
+
+Main never fans out to workflow workers. The clean Orchestrator is the workflow
+Lead and owns integration and final writes. Portable source owns contracts,
+admission arithmetic, deterministic operations, validation, and accounting; it
+does not own native spawn/block/join/queue/rotation/finalization.
+
+Fresh Codex scaffolds start fail closed with `delivery_level:
+capability_required` and an unknown `agent-workflow.runtime-capabilities.v1`
+snapshot. `--mode scaffold` accepts that planning state; `--mode planned`
+requires an observed snapshot and a derived admitted mode. The host or adapter,
+not the skill, must provide the facts.
+
+```json
+{
+  "schema_version": "agent-workflow.clean-orchestrator-runtime.v1",
+  "activation": "native_default",
+  "topology": "main_single_clean_orchestrator_nested_workers",
+  "context_origin": "clean_packet",
+  "parent_transcript": "excluded",
+  "orchestrator_fork_turns": "none",
+  "delivery_level": "bounded_interim",
+  "legacy_main_fanout": "forbidden_production",
+  "capabilities": {
+    "schema_version": "agent-workflow.runtime-capabilities.v1",
+    "protocol_version": "clean-orchestrator-host.v1",
+    "runtime_class": "codex_builtin_subagents",
+    "observed_at": "2026-07-11T00:00:00Z",
+    "source": "host_runtime_probe",
+    "status": "observed",
+    "values": {
+      "atomic_orchestrator_spawn_and_block": false,
+      "all_terminal_durable_barrier": false,
+      "progress_suppression": false,
+      "automatic_session_registration": false,
+      "resumable_barrier": false,
+      "minimal_profile": false,
+      "terminal_host_finalization": false,
+      "clean_context": true,
+      "direct_terminal_event_wait": true,
+      "subtree_discovery": true,
+      "exact_cumulative_token_events": true,
+      "queued_native_dispatch": false,
+      "generation_rotation": false,
+      "max_native_wait_ms": 3600000,
+      "max_concurrent_sessions": 4,
+      "available_child_slots": 2
+    }
+  },
+  "admission": {
+    "planned_rounds": 2,
+    "planned_lanes": 4,
+    "max_parallelism": 2,
+    "workflow_deadline_ms": 1800000,
+    "estimated_coordinator_completions_worst_case": 8,
+    "estimated_coordinator_tokens_worst_case": 300000,
+    "max_coordinator_completions": 8,
+    "max_coordinator_tokens": 400000,
+    "coordinator_token_calibration": {
+      "status": "observed",
+      "source": "runtime-class upper-bound fixture",
+      "tokens_per_completion_upper_bound": 37500
+    },
+    "fixed_protocol_overhead_completions": 2,
+    "decision": "admit_bounded_interim",
+    "reason": "Observed interim capabilities and all declared worst-case bounds pass."
+  },
+  "completion_classification_version": "agent-workflow.completion-density.v1",
+  "host_owned_boundaries": [
+    "atomic_orchestrator_spawn_and_block",
+    "all_terminal_durable_barrier",
+    "automatic_session_registration",
+    "generation_rotation",
+    "minimal_profile",
+    "progress_suppression",
+    "queued_native_dispatch",
+    "resumable_barrier",
+    "terminal_host_finalization"
+  ]
+}
+```
+
+Admission is recomputed; the declared decision is never trusted. The completion
+worst case is derived from every sealed per-class round maximum, one dispatch
+reactivation per round, and an explicit fixed protocol overhead; it must also
+fit each sealed absolute round cap. The token worst case must equal that
+derived count times an observed runtime-class upper bound. Missing calibration or
+understated arithmetic rejects dispatch. Every admitted
+mode needs clean context, direct terminal-event wait, complete subtree discovery,
+and exact cumulative token events. Deadline must fit `max_native_wait_ms`;
+worst-case completions/tokens must fit their maxima. Without queued dispatch,
+round `max_parallelism` must not exceed `available_child_slots`.
+
+`target` additionally requires every target-only host primitive. A portable
+script, prompt, `multi_target` wait ledger, or extra Coordinator agent cannot
+satisfy those capabilities. `bounded_interim` records the missing primitives and
+native sibling-terminal returns explicitly; it does not claim all-terminal
+await, atomic outer blocking, generation rotation, or terminal host finalization.
+
+### Per-round sealed completion-density contract
+
+Every active round adds these fields before dispatch:
+
+```json
+{
+  "runtime_mode": "target",
+  "dispatch_mode": "queued_barrier",
+  "max_parallelism": 3,
+  "semantic_return_gate": "all_terminal",
+  "compound_operation": "execute_round",
+  "deterministic_steps": [
+    "workspace_and_schema_validation",
+    "batch_dispatch_and_registration",
+    "durable_join_and_result_collection",
+    "artifact_commit_render_and_accounting"
+  ],
+  "completion_budget": {
+    "initial_dispatch_reactivations_max": 1,
+    "round_result_reactivations": 1,
+    "extra_semantic_repairs": 0,
+    "housekeeping_completions": 0,
+    "status_only_completions": 0,
+    "wrapper_wait_completions": 0,
+    "partial_terminal_completions": 0,
+    "deterministic_tool_result_reactivations_max": 0,
+    "native_sibling_terminal_reactivations_max": 0,
+    "absolute_coordinator_completions_max": 8
+  },
+  "semantic_gates": [
+    {
+      "gate_id": "round-001-all-terminal",
+      "gate_class": "decision_gate",
+      "trigger": "all planned lane attempts are terminal",
+      "allowed_decisions": ["advance", "repair", "human_gate", "blocked"]
+    }
+  ],
+  "gate_graph_seal": {
+    "schema_version": "agent-workflow.semantic-gate-graph.v1",
+    "sealed_before_dispatch": true,
+    "content_sha256": "sha256:..."
+  }
+}
+```
+
+`prepare_dispatch.py` seals the canonical round contract before attempts start.
+Changing the round purpose, return gate, deterministic graph, budget, or
+semantic gates after that invalidates the digest. An execution-time repair gate
+needs an event reference, trigger evidence, and decision diff; housekeeping
+cannot be renamed as repair.
+
+`runner-evidence.json.completion_density` uses
+`agent-workflow.completion-density.v1`. Every runtime-backed coordinator
+completion has one unique `event_ref` and exactly one class:
+
+```text
+initial_dispatch, decision_gate, repair_gate, human_gate, final_synthesis,
+native_sibling_terminal_reactivation, deterministic_tool_result_reactivation,
+status_only, wrapper_wait, partial_terminal
+```
+
+The classifier precedence is semantic gates first, then the sealed round-result
+gate, then bounded native sibling terminals, then deterministic results; status,
+wrapper, and partial-terminal remain forbidden classes. Target requires one
+round decision reactivation and zero deterministic/sibling/forbidden wakes.
+Bounded interim reports those native exceptions separately and still enforces
+every sealed absolute and per-class completion budget. Historical bootstrap
+overruns may be recorded as typed `deferred_with_reason` findings, but an
+overrun never makes executed or final completion-density validation pass. A
+larger budget must be sealed in a new round before dispatch.
+
+### Source-owned compound controller
+
+`scripts/workflow_controller.py` exposes `start`, `prepare`, `collect`, and `finalize`.
+Each command runs multiple deterministic helpers inside one process and writes a
+bounded `agent-workflow.controller-receipt.v1` under `controller-receipts/`.
+The receipt lists step commands, exit codes, output digests/excerpts, host-owned
+boundaries, and next allowed decisions.
+
+`start` is the preferred accounting-boundary operation. Prepare the entire
+static workspace first, including a marker-bearing final report, terminal
+candidate state, orchestration, scenario evidence, integration and runner
+skeletons, all static input refs, and this fail-closed declaration:
+
+```json
+{
+  "schema_version": "agent-workflow.accounting-start.v1",
+  "participants": [
+    {
+      "execution_ref": "round-001:verify-01:attempt-001",
+      "agent_id": "native-session-id",
+      "round_id": "round-001",
+      "lane_id": "verify-01",
+      "registration_mode": "reuse_existing_session"
+    }
+  ]
+}
+```
+
+The manifest accepts only exact fields, 1..64 unique execution refs, known
+enabled round/lane pairs, and `new_session` or `reuse_existing_session` modes.
+Missing, malformed, unrelated, or unreadable participants fail before the
+original token ledger is committed. In one model/tool completion, `start` runs
+dispatch preparation, planned validation, optional card rendering, then stages
+the Lead accounting snapshot and every declared registration before replacing
+`token-usage.json` and `token-evidence.json` with per-file atomic writes. A fresh
+scaffold deliberately omits `token-evidence.json`; `start` creates it from the
+native snapshot rather than requiring a fake `{}` file. Before replacement,
+the controller snapshots each ledger as its original bytes or as absent. If
+either replacement fails, it restores existing bytes and removes only a ledger
+newly created by that failed transaction, leaving no orphan evidence and
+returning a failed, uncommitted receipt. Every pass or fail start receipt carries
+`original_ledger_state`: each ledger has `present: false` with no invented
+digest, or `present: true` plus the SHA-256 of its exact original bytes. This
+makes fresh absence, existing content, and rollback fidelity independently
+auditable. Cross-file or host atomicity is not claimed. The
+snapshot therefore starts after static preparation. Internal subprocesses do
+not create model completions. Planned validation accepts only the unstarted
+ledger; an already-started boundary cannot be replayed through planned mode.
+
+The controller never spawns, waits on, joins, queues, or rotates agents. Its
+`collect` operation runs only after the one event-driven wait has returned. It
+reopens the raw Lead log, requires exactly one declared follow-up and one
+non-timeout wait, requires a `Message Type: FINAL_ANSWER` event from the matched
+declared native handle, and binds the raw wait call to the pre-created runner skeleton.
+Codex may persist that terminal agent message immediately before or after the
+wait output. Both orders pass when the message occurs after the unique follow-up
+and before the next non-collaboration action. A stale pre-follow-up message,
+wrong author, nonterminal message, or wait result alone never proves terminal
+completion. The controller then
+writes the terminal lane decision into `state.json` and the current
+`integration.json`, emits compact receipts for every enabled lane, collects the
+compact index, and validates executed mode inside the same model/tool completion.
+All collect-side mutations occur in a private staged workspace; runner, state,
+integration, receipts, index, and card projections are copied back only after
+every step passes. A failed receipt or executed gate leaves the original
+workspace unchanged and the typed collect receipt reports an uncommitted staged
+transaction.
+Its
+`finalize` operation first runs `runtime_harness.py collect`, which reopens the
+raw Codex session prefix from the token-accounting start event through the last
+complete pre-finalizer `token_count`. Its protocol state machine treats the
+previous tool output as the next completion's trigger and the current tool call
+as that completion's action, preventing call/output/token timestamp skew. It
+derives every completion's trigger/action binding, `last_token_usage` input context, mutually exclusive class, round,
+outcome, and planned/actual density. It then runs executed validation, exact
+token finalization, reconciles exact actor totals into
+`runtime-observations.json`, binds
+the prepared `{{WORKFLOW_TOTAL_TOKENS}}`, `{{WORKFLOW_TOKEN_SOURCE}}`, and
+`{{WORKFLOW_TOKEN_CONFIDENCE}}` report markers, then runs final workflow
+validation without an intervening model reactivation. This preserves the
+source-owned terminal ordering but does not claim host-terminal atomicity. After
+the operation returns, perform no workflow tool work.
+
+The portable finalizer copies the full workflow into a private staging
+directory, runs replay, exact accounting, reconcile, marker binding, and final
+validation only there, then replaces each of the five terminal projections
+atomically per file and commits `terminal-commit.json` last. The manifest binds
+one revision to all five digests, so final validation rejects an interrupted
+mixed revision; portable bundle atomicity is not claimed. Marker-missing,
+reconcile-drift, and final-verifier
+fault injection tests prove a failed operation never mutates the original
+pending ledger or leaves an unrecoverable `token-usage.status=complete` state.
+
+`runtime-harness.json` supplies only the declared default round and honest host
+boundary labels. `runtime-observations.json` is rebuilt from raw runtime events
+and binds a sealed JSONL prefix hash plus the token-evidence digest. Final mode
+reopens that prefix and rejects drift between the raw replay and
+`runner-evidence.json.completion_density`; artifact totals or classifications
+cannot override raw truth. Deterministic fixtures under
+`fixtures/runtime-harness/` cover normal two-round execution, bounded repair,
+worker interruption/timeout, frozen terminal input transport, and unattested
+successor rejection.
+
 ## Default Native Execution-Efficiency Artifacts
 
 Execution efficiency extends new native v1 workspaces automatically when
@@ -550,9 +837,18 @@ preparation, each lane `input_refs` entry becomes a file-bound object:
 
 `root` is exactly `workflow` or `workspace`. Dot paths, parent traversal,
 directories, missing files, duplicate references, and stale content digests
-fail validation. Prior lane JSON may be referenced as a file only after it
-exists and receives this content binding; its contents are never injected as
+fail planned validation. Prior lane JSON may be referenced as a file only after
+it exists and receives this content binding; its contents are never injected as
 implicit parent context.
+
+Once both a lane output and its valid compact receipt exist, that terminal
+transport freezes the dispatch-time input hashes. Later, separately sealed
+implementation or repair rounds may intentionally change those source files;
+executed/final validation then verifies the frozen dispatch digest, current
+lane-output digest, receipt, and integration index instead of comparing the old
+input hash to the new source contents. `prepare_dispatch.py` preserves terminal
+lane refs and dispatch digests. Output-only or receipt-only transport is
+partial and fails closed, so it cannot be used to bypass live input validation.
 Dispatch preparation also computes one `workflow_contract_sha256` over title,
 slug, goal, success criteria, constraints, and non-goals. Every lane execution,
 receipt, and integration-index entry carries that digest. A passing verify
@@ -869,17 +1165,18 @@ When a card exists, final mode recomputes these fields and rejects drift. The ca
 ## `token-usage.json`
 
 New workflow final summaries report an exact total computed from native runtime
-session events. `new_workflow.py` scaffolds
-`agent-workflow.token-usage.v2` and attempts to capture a Codex start snapshot
-automatically. If no supported runtime log is available, exact accounting fails
-closed; a Lead estimate cannot satisfy a v2 final pass.
+session events. `new_workflow.py` scaffolds an unstarted
+`agent-workflow.token-usage.v2`; it never begins the boundary while workspace
+files are still being authored. If no supported runtime log is available when
+the compound controller starts, exact accounting fails closed; a Lead estimate
+cannot satisfy a v2 final pass.
 
 Required lifecycle:
 
-1. Let `new_workflow.py` auto-start from `CODEX_THREAD_ID`, or run `python3 scripts/token_accounting.py start <workflow-dir> --runtime codex|claude --lead-session-id <id>` before dispatch.
-2. Immediately after every native spawn, including retry, fallback, escalation, or repair, run `python3 scripts/token_accounting.py register-agent <workflow-dir> --execution-ref <attempt-ref> --agent-id <session-id> --round-id <round-id> --lane-id <lane-id>`.
-3. Finish release checks, integration, final gates, and every registered subagent lifecycle before accounting.
-4. In the next accounting-only Lead completion, run `python3 scripts/token_accounting.py finalize <workflow-dir>`, then do no more workflow work. Deliver the already-prepared response only after final validation passes; if accounting fails, gate or block instead of estimating.
+1. Finish every static workspace/report/source artifact and declare the bounded participant attempts in `accounting-start.json`.
+2. Run `python3 scripts/workflow_controller.py start <workflow-dir> [--runtime codex|claude --lead-session-id <id>]` exactly once. It prepares and validates static dispatch first, then captures the Lead snapshot and registers every declaration, including reused-session raw start snapshots, in one staged ledger commit.
+3. Dispatch only those declared participants. A later retry, fallback, escalation, repair, or newly created descendant still requires explicit registration and therefore a new truthfully budgeted coordinator completion; prefer fully declared reused attempts when the minimal-boundary protocol requires no extra registration call.
+4. Finish integration, final gates, and every registered subagent lifecycle. In the terminal accounting-only Lead completion, run `python3 scripts/workflow_controller.py finalize <workflow-dir>`, then do no more workflow work. Deliver the already-prepared response only after final validation passes; if accounting fails, gate or block instead of estimating.
 
 ```json
 {
@@ -940,6 +1237,10 @@ The helper uses `actor_deltas` rather than lane estimates:
   attempts, and the runtime-discovered Codex descendant tree or Claude
   subagent directory. An attempt omitted from both Lead-authored ledgers still
   fails when its native child session exists.
+- A Codex `token_count` event with `info: null` is an incomplete snapshot, not
+  zero usage and not a terminal parser failure. The parser continues to the
+  final complete cumulative snapshot, rejects decreasing counters, and fails
+  closed only when no complete snapshot exists or the complete event is invalid.
 
 `token-evidence.json` stores start/end event references, event hashes, runtime
 session ids, agent terminal snapshots, and the exact usage fields used by the

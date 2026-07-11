@@ -1,0 +1,24 @@
+{
+  "schema_version": "agent-workflow.runtime-harness-scenario.v1",
+  "name": "worker_interruption_timeout",
+  "kind": "raw_completion_replay",
+  "rounds": ["round-001"],
+  "events": [
+    {"round_id": "round-001", "tool": "collaboration.spawn_agent", "output": "spawned reviewer-a"},
+    {"round_id": "round-001", "tool": "collaboration.wait_agent", "output": "timeout terminal gate after worker interruption"}
+  ],
+  "expected_classes": {"initial_dispatch": 1, "decision_gate": 1},
+  "expected_outcome": "timeout_terminal_gate",
+  "expected_status_wrapper_partial": 0,
+  "barrier_resume": {
+    "attempt_id_before": "attempt-reviewer-a-001",
+    "attempt_id_after": "attempt-reviewer-a-001",
+    "deadline_before": "2026-07-11T00:15:00Z",
+    "deadline_after": "2026-07-11T00:15:00Z",
+    "terminal_before": [],
+    "active_before": ["reviewer-a"],
+    "terminal_after": [],
+    "active_after": ["reviewer-a"],
+    "duplicate_spawn": false
+  }
+}

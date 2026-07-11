@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -532,6 +533,68 @@ class ModelRoutingTests(unittest.TestCase):
             self.assertVerifierPasses(claude, "executed")
             self._materialize_final_contract(claude)
             self.assertVerifierPasses(claude, "final")
+
+    def test_terminal_template_accepts_final_substance_with_token_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow, exact_report, marker_report = self._terminal_template_fixture(
+                Path(temp), "terminal-template-positive"
+            )
+            self.assertEqual(
+                [], verify_workflow.validate_terminal_candidate_template(workflow)
+            )
+            (workflow / "final-report.md").write_text(exact_report, encoding="utf-8")
+            self.assertTrue(
+                verify_workflow.final_report_has_substance(workflow / "final-report.md")
+            )
+            (workflow / "final-report.md").write_text(marker_report, encoding="utf-8")
+
+    def test_terminal_template_rejects_zero_concrete_evidence_units(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow, _, marker_report = self._terminal_template_fixture(
+                Path(temp), "terminal-template-no-evidence"
+            )
+            mutated = re.sub(
+                r"## Verification Evidence\n.*?\n## Remaining Risk",
+                (
+                    "## Verification Evidence\n\n"
+                    "The candidate was reviewed carefully, and every expected area "
+                    "appears satisfactory.\n\n## Remaining Risk"
+                ),
+                marker_report,
+                flags=re.DOTALL,
+            )
+            (workflow / "final-report.md").write_text(mutated, encoding="utf-8")
+            failures = verify_workflow.validate_terminal_candidate_template(workflow)
+            self.assertTrue(any("authoritative" in item for item in failures))
+
+    def test_terminal_template_rejects_missing_verify_name_evidence_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow, _, marker_report = self._terminal_template_fixture(
+                Path(temp), "terminal-template-missing-pairs"
+            )
+            mutated = marker_report.replace("routing contract", "different contract")
+            mutated = mutated.replace(
+                "workflow final validator", "different final validator"
+            )
+            (workflow / "final-report.md").write_text(mutated, encoding="utf-8")
+            failures = verify_workflow.validate_terminal_candidate_template(workflow)
+            self.assertTrue(any("authoritative" in item for item in failures))
+
+    def test_terminal_template_rejects_lead_recorded_passive_overclaim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow, _, marker_report = self._terminal_template_fixture(
+                Path(temp), "terminal-template-passive-overclaim"
+            )
+            mutated = marker_report.replace(
+                "The routing attempts are treated as lead-recorded contract data.",
+                (
+                    "The routing attempts are treated as lead-recorded contract data. "
+                    "The lead-recorded output was produced by native subagent execution."
+                ),
+            )
+            (workflow / "final-report.md").write_text(mutated, encoding="utf-8")
+            failures = verify_workflow.validate_terminal_candidate_template(workflow)
+            self.assertTrue(any("authoritative" in item for item in failures))
 
     def test_native_execution_efficiency_is_default_with_model_routing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1550,6 +1613,70 @@ class ModelRoutingTests(unittest.TestCase):
         record = self._record(decision, [attempt])
         record["planned_decision_sha256"] = "sha256:" + "0" * 64
         return record
+
+    def _terminal_template_fixture(
+        self, root: Path, slug: str
+    ) -> tuple[Path, str, str]:
+        workflow = self._scaffold(
+            root,
+            slug,
+            "codex_builtin_subagents",
+            lanes="verify",
+        )
+        self._materialize_strict_contract(workflow)
+        output_path = self._write_lane_output(workflow, "verify-01", "verify")
+        output = load_json(output_path)
+        second_evidence = (
+            "rounds/round-001/lane-runs/verify-01.json records workflow final validator"
+        )
+        output["payload"]["checks"].append(
+            {
+                "name": "workflow final validator",
+                "kind": "inspection",
+                "status": "pass",
+                "evidence": second_evidence,
+            }
+        )
+        write_json(output_path, output)
+        evidence = load_json(workflow / "runner-evidence.json")
+        evidence["agents"] = [
+            self._unrouted_record(
+                lane_id="verify-01",
+                output_path=str(output_path.relative_to(workflow)),
+                spawn_tool="codex_spawn_agent",
+                agent_id="terminal-template-reviewer",
+            )
+        ]
+        write_json(workflow / "runner-evidence.json", evidence)
+        self._materialize_final_contract(workflow)
+
+        report_path = workflow / "final-report.md"
+        exact_report = report_path.read_text(encoding="utf-8")
+        second_pair_line = (
+            "- final validator pair: `rounds/round-001/lane-runs/verify-01.json` "
+            "records check name workflow final validator, status pass, and evidence "
+            "`rounds/round-001/lane-runs/verify-01.json records workflow final validator`.\n"
+        )
+        exact_report = exact_report.replace(
+            "- integration gate:", f"{second_pair_line}- integration gate:"
+        )
+        report_path.write_text(exact_report, encoding="utf-8")
+        self.assertTrue(verify_workflow.final_report_has_substance(report_path))
+
+        marker_report = re.sub(
+            r"(## Token Usage\n\n).*\Z",
+            (
+                r"\1Total workflow usage is {{WORKFLOW_TOTAL_TOKENS}} tokens from "
+                r"{{WORKFLOW_TOKEN_SOURCE}} accounting with "
+                r"{{WORKFLOW_TOKEN_CONFIDENCE}} confidence. The candidate preserves "
+                r"exact start and end delta arithmetic and excludes accounting "
+                r"finalizer completion and the final user response from its boundary.\n"
+            ),
+            exact_report,
+            flags=re.DOTALL,
+        )
+        report_path.write_text(marker_report, encoding="utf-8")
+        return workflow, exact_report, marker_report
 
     def _scaffold(
         self,

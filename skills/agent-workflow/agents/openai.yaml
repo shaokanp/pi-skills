@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Workflow"
-  short_description: "Planner-first multi-agent harness loop with review, challenge, verify, and iteration"
-  default_prompt: "Use $agent-workflow to plan the smallest appropriate agent workflow, show a CJK-safe left-rail Swarm Card when the display policy triggers, use native subagents only when justified and available, and record what actually ran."
+  short_description: "Clean-Orchestrator multi-agent harness with sealed gates, review, verify, and repair"
+  default_prompt: "Use $agent-workflow with the default Main-to-one-clean-Orchestrator topology, seal every round's semantic gates and completion budget before dispatch, show the event-driven Swarm Card, use native subagents only after capability admission, and record target versus bounded-interim behavior honestly."

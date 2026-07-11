@@ -1,0 +1,7 @@
+{
+  "schema_version": "agent-workflow.runtime-harness-scenario.v1",
+  "name": "unattested_successor_rejection",
+  "kind": "successor_lineage_contract",
+  "mutation": "append_unattested_lead_generation",
+  "expected_error": "without host-issued lineage evidence"
+}

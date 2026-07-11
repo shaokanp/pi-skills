@@ -11,6 +11,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from clean_orchestrator import (
+    CLEAN_RUNTIME_SCHEMA,
+    build_clean_runtime_contract,
+    build_empty_completion_density,
+    build_round_runtime_contract,
+)
 from execution_efficiency import build_execution_policy, build_lane_execution
 from model_routing import (
     RoutingError,
@@ -19,11 +25,10 @@ from model_routing import (
     prepare_capability_snapshot,
 )
 from render_swarm_card import build_initial_card
+from runtime_harness import HARNESS_SCHEMA
 from token_accounting import (
     TOKEN_USAGE_SCHEMA,
-    TokenAccountingError,
     new_token_usage,
-    start_accounting,
 )
 
 
@@ -524,6 +529,25 @@ def main() -> int:
         ],
         "final_status": "pending",
     }
+    if resolved_runner_mode == "codex_builtin_subagents" and execution_policy is not None:
+        state["runtime_contract"] = {
+            "required_schema": CLEAN_RUNTIME_SCHEMA,
+            "default_topology": "main_single_clean_orchestrator_nested_workers",
+            "legacy_main_fanout": "forbidden_production",
+        }
+    initial_round = {
+        "round_id": round_id,
+        "objective": "First planned round.",
+        "lanes": lane_specs,
+    }
+    if resolved_runner_mode == "codex_builtin_subagents" and execution_policy is not None:
+        runtime_round = build_round_runtime_contract(
+            round_id=round_id,
+            objective=str(initial_round["objective"]),
+            lane_ids=[str(spec["id"]) for spec in lane_specs],
+        )
+        runtime_round["lanes"] = lane_specs
+        initial_round = runtime_round
     orchestration = {
         "schema_version": "agent-loops.orchestration.v1",
         "workflow": {
@@ -559,14 +583,12 @@ def main() -> int:
                 "polling": "disabled_status_only_event_updates",
             },
         },
-        "rounds": [
-            {
-                "round_id": round_id,
-                "objective": "First planned round.",
-                "lanes": lane_specs,
-            }
-        ],
+        "rounds": [initial_round],
     }
+    if resolved_runner_mode == "codex_builtin_subagents" and execution_policy is not None:
+        orchestration["clean_orchestrator_runtime"] = build_clean_runtime_contract(
+            resolved_runner_mode
+        )
     if routing_context is not None:
         orchestration["model_routing"] = build_model_routing_block(*routing_context)
     if execution_policy is not None:
@@ -615,6 +637,17 @@ def main() -> int:
             "functions_wait_calls": 0,
             "wait_waves": [],
             "card_events": [],
+        }
+    if "clean_orchestrator_runtime" in orchestration:
+        runner_evidence["completion_density"] = build_empty_completion_density(
+            orchestration
+        )
+        runtime_harness = {
+            "schema_version": HARNESS_SCHEMA,
+            "default_round_id": round_id,
+            "source": "raw_runtime_session_events",
+            "artifact_projection_is_truth": False,
+            "outer_main_post_terminal_wake": "outside_sealed_subtree_unobserved",
         }
     token_usage = new_token_usage()
 
@@ -695,6 +728,8 @@ Cross-runtime CLI calls allowed: `false`
     write_json_new(run_dir / "token-usage.json", token_usage)
     write_json_new(run_dir / "orchestration.json", orchestration)
     write_json_new(run_dir / "runner-evidence.json", runner_evidence)
+    if "clean_orchestrator_runtime" in orchestration:
+        write_json_new(run_dir / "runtime-harness.json", runtime_harness)
     should_scaffold_card = (
         args.swarm_card == "auto"
         and bool(lane_specs)
@@ -760,26 +795,11 @@ Cross-runtime CLI calls allowed: `false`
 
 ## Token Usage
 
+Workflow tokens: {{{{WORKFLOW_TOTAL_TOKENS}}}} ({{{{WORKFLOW_TOKEN_SOURCE}}}}, {{{{WORKFLOW_TOKEN_CONFIDENCE}}}}; excludes accounting finalizer and final user-facing response).
+
 ## Stop Reason
 """,
     )
-
-    persisted_token_usage = json.loads(
-        (run_dir / "token-usage.json").read_text(encoding="utf-8")
-    )
-    if (
-        isinstance(persisted_token_usage, dict)
-        and persisted_token_usage.get("schema_version") == TOKEN_USAGE_SCHEMA
-        and persisted_token_usage.get("accounting", {}).get("started_at") is None
-    ):
-        try:
-            start_accounting(run_dir)
-        except TokenAccountingError as exc:
-            print(
-                "Exact token accounting is pending; run "
-                f"scripts/token_accounting.py start {run_dir}: {exc}",
-                file=sys.stderr,
-            )
 
     print(run_dir)
     return 0

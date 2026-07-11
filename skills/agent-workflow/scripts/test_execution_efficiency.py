@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+import clean_orchestrator
 import execution_efficiency
 import new_workflow
 import verify_workflow
@@ -90,6 +91,62 @@ class ExecutionEfficiencyTests(unittest.TestCase):
             "Every enabled lane writes a validated artifact and compact receipt."
         ]
         orchestration["rounds"][0]["objective"] = "Exercise bounded native lanes."
+        runtime = orchestration.get("clean_orchestrator_runtime")
+        if isinstance(runtime, dict):
+            runtime["delivery_level"] = "bounded_interim"
+            runtime["capabilities"] = {
+                "schema_version": clean_orchestrator.CAPABILITY_SCHEMA,
+                "protocol_version": "clean-orchestrator-host.v1",
+                "runtime_class": "codex_builtin_subagents",
+                "observed_at": "2026-07-11T00:00:00Z",
+                "source": "execution_efficiency_fixture",
+                "status": "observed",
+                "values": {
+                    "atomic_orchestrator_spawn_and_block": False,
+                    "all_terminal_durable_barrier": False,
+                    "progress_suppression": False,
+                    "automatic_session_registration": False,
+                    "resumable_barrier": False,
+                    "minimal_profile": False,
+                    "terminal_host_finalization": False,
+                    "clean_context": True,
+                    "direct_terminal_event_wait": True,
+                    "subtree_discovery": True,
+                    "exact_cumulative_token_events": True,
+                    "queued_native_dispatch": False,
+                    "generation_rotation": False,
+                    "max_native_wait_ms": 3_600_000,
+                    "max_concurrent_sessions": 4,
+                    "available_child_slots": 2,
+                },
+            }
+            runtime["admission"].update(
+                {
+                    "workflow_deadline_ms": 900_000,
+                    "estimated_coordinator_completions_worst_case": 11,
+                    "estimated_coordinator_tokens_worst_case": 220_000,
+                    "max_coordinator_completions": 11,
+                    "max_coordinator_tokens": 300_000,
+                    "coordinator_token_calibration": {
+                        "status": "observed",
+                        "source": "execution efficiency fixture upper bound",
+                        "tokens_per_completion_upper_bound": 20_000,
+                    },
+                    "fixed_protocol_overhead_completions": 2,
+                }
+            )
+            round_plan = orchestration["rounds"][0]
+            round_plan["runtime_mode"] = "bounded_interim"
+            round_plan["dispatch_mode"] = "native_direct_terminal_events"
+            round_plan["completion_budget"][
+                "native_sibling_terminal_reactivations_max"
+            ] = 2
+            round_plan["completion_budget"][
+                "deterministic_tool_result_reactivations_max"
+            ] = 4
+            round_plan["completion_budget"][
+                "absolute_coordinator_completions_max"
+            ] = 12
         for index, lane in enumerate(orchestration["rounds"][0]["lanes"], start=1):
             lane["purpose"] = f"Answer the bounded {lane['lane']} fixture question."
             output_path = lane["execution"]["output_path"]
@@ -362,6 +419,33 @@ class ExecutionEfficiencyTests(unittest.TestCase):
             executed = run_command(str(VERIFY_WORKFLOW), str(workflow), "--mode", "executed")
             self.assertEqual(0, executed.returncode, executed.stdout)
 
+            frozen_dispatches = {
+                lane["id"]: lane["execution"]["dispatch_sha256"]
+                for lane in orchestration["rounds"][0]["lanes"]
+            }
+            first_ref = orchestration["rounds"][0]["lanes"][0]["input_refs"][0]
+            base = workflow if first_ref["root"] == "workflow" else workflow.parent.parent
+            mutable_input = base / first_ref["path"]
+            mutable_input.write_text(
+                mutable_input.read_text(encoding="utf-8")
+                + "\nChanged by a later, separately sealed implementation round.\n",
+                encoding="utf-8",
+            )
+            historical = run_command(
+                str(VERIFY_WORKFLOW), str(workflow), "--mode", "executed"
+            )
+            self.assertEqual(0, historical.returncode, historical.stdout)
+            prepared_again = run_command(str(PREPARE_DISPATCH), str(workflow))
+            self.assertEqual(0, prepared_again.returncode, prepared_again.stdout)
+            preserved = load_json(workflow / "orchestration.json")
+            self.assertEqual(
+                frozen_dispatches,
+                {
+                    lane["id"]: lane["execution"]["dispatch_sha256"]
+                    for lane in preserved["rounds"][0]["lanes"]
+                },
+            )
+
             stale_target = copy.deepcopy(orchestration)
             stale_target["workflow"]["goal"] = "A different goal after lane execution."
             write_json(workflow / "orchestration.json", stale_target)
@@ -405,6 +489,31 @@ class ExecutionEfficiencyTests(unittest.TestCase):
             result = run_command(str(VERIFY_WORKFLOW), str(workflow), "--mode", "planned")
             self.assertNotEqual(0, result.returncode)
             self.assertIn("content_sha256 does not match", result.stdout)
+
+    def test_partial_terminal_transport_fails_closed(self) -> None:
+        for partial_kind in ("output_only", "receipt_only"):
+            with self.subTest(partial_kind=partial_kind), tempfile.TemporaryDirectory() as temp:
+                workflow = self.scaffold(
+                    Path(temp),
+                    f"partial-{partial_kind}",
+                    "codex_builtin_subagents",
+                )
+                orchestration = self.prepare_planned(workflow)
+                lane = orchestration["rounds"][0]["lanes"][0]
+                if partial_kind == "output_only":
+                    self.write_lane_output(workflow, lane["id"], lane["lane"])
+                else:
+                    write_json(
+                        workflow
+                        / "rounds"
+                        / "round-001"
+                        / "receipts"
+                        / f"{lane['id']}.json",
+                        {"schema_version": "agent-workflow.lane-receipt.v1"},
+                    )
+                result = run_command(str(PREPARE_DISPATCH), str(workflow))
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("partial terminal transport", result.stdout)
 
     def test_digest_drift_and_lane_admission_fail_closed(self) -> None:
         policy = execution_efficiency.build_execution_policy("codex_builtin_subagents")

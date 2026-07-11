@@ -136,6 +136,7 @@ def new_token_usage() -> dict[str, Any]:
         "accounting": {
             "runtime": None,
             "lead_session_id": None,
+            "lead_generations": [],
             "started_at": None,
             "finalized_at": None,
             "participants": [],
@@ -259,6 +260,46 @@ def validate_session_identity(runtime: str, path: Path, session_id: str, *, lead
         )
 
 
+def discover_codex_descendants(
+    root: Path,
+    lead_session_id: str,
+    *,
+    created_at_or_after: str | None,
+) -> set[str]:
+    """Return raw parent-lineage descendants, optionally creation-time bounded."""
+
+    boundary = _timestamp(created_at_or_after) if created_at_or_after else None
+    metas: dict[str, dict[str, Any]] = {}
+    for search_root in (root / "sessions", root / "archived_sessions"):
+        if not search_root.is_dir():
+            continue
+        for path in search_root.rglob("*.jsonl"):
+            try:
+                meta = codex_session_meta(path)
+            except TokenAccountingError:
+                continue
+            metas[str(meta["id"])] = meta
+    descendants = {lead_session_id}
+    changed = True
+    while changed:
+        changed = False
+        for session_id, meta in metas.items():
+            if session_id in descendants or meta.get("parent_id") not in descendants:
+                continue
+            if not _is_timestamp(meta.get("timestamp")):
+                continue
+            descendants.add(session_id)
+            changed = True
+    descendants.discard(lead_session_id)
+    if boundary is None:
+        return descendants
+    return {
+        session_id
+        for session_id in descendants
+        if _timestamp(str(metas[session_id]["timestamp"])) >= boundary
+    }
+
+
 def discover_runtime_agents(
     runtime: str,
     root: Path,
@@ -268,30 +309,11 @@ def discover_runtime_agents(
 ) -> set[str]:
     boundary = _timestamp(started_at)
     if runtime == "codex":
-        metas: dict[str, dict[str, Any]] = {}
-        for search_root in (root / "sessions", root / "archived_sessions"):
-            if not search_root.is_dir():
-                continue
-            for path in search_root.rglob("*.jsonl"):
-                try:
-                    meta = codex_session_meta(path)
-                except TokenAccountingError:
-                    continue
-                metas[str(meta["id"])] = meta
-        descendants = {lead_session_id}
-        changed = True
-        while changed:
-            changed = False
-            for session_id, meta in metas.items():
-                if session_id in descendants or meta.get("parent_id") not in descendants:
-                    continue
-                if not _is_timestamp(meta.get("timestamp")):
-                    continue
-                if _timestamp(meta["timestamp"]) < boundary:
-                    continue
-                descendants.add(session_id)
-                changed = True
-        return descendants - {lead_session_id}
+        return discover_codex_descendants(
+            root,
+            lead_session_id,
+            created_at_or_after=started_at,
+        )
     subagents_root = lead_path.with_suffix("") / "subagents"
     discovered: set[str] = set()
     if not subagents_root.is_dir():
@@ -307,6 +329,55 @@ def discover_runtime_agents(
         if _timestamp(meta["timestamp"]) >= boundary:
             discovered.add(normalize_agent_id(agent_id))
     return discovered
+
+
+def validate_reused_codex_participant(
+    agent_id: str,
+    records: list[dict[str, Any]],
+    agent_path: Path,
+    full_descendants: set[str],
+) -> None:
+    if agent_id not in full_descendants:
+        raise TokenAccountingError(
+            f"Reused registered agent is not a raw-attested descendant: {agent_id}"
+        )
+    if any(record.get("registration_mode") != "reuse_existing_session" for record in records):
+        raise TokenAccountingError(
+            f"Reused agent records must all declare reuse_existing_session: {agent_id}"
+        )
+    for record in records:
+        snapshot = record.get("start_snapshot")
+        if not isinstance(snapshot, dict):
+            raise TokenAccountingError(
+                f"Reused agent registration lacks start_snapshot: {agent_id}"
+            )
+        if snapshot.get("runtime") != "codex" or snapshot.get("session_id") != agent_id:
+            raise TokenAccountingError(
+                f"Reused agent start_snapshot identity mismatch: {agent_id}"
+            )
+        if str(snapshot.get("event_ref") or "").endswith(":session-origin"):
+            raise TokenAccountingError(
+                f"Reused agent start_snapshot must bind a raw token event: {agent_id}"
+            )
+        source_path = snapshot.get("source_path")
+        if not isinstance(source_path, str) or Path(source_path).expanduser().resolve() != agent_path.resolve():
+            raise TokenAccountingError(
+                f"Reused agent start_snapshot source mismatch: {agent_id}"
+            )
+        registered_at = record.get("registered_at")
+        captured_at = snapshot.get("captured_at")
+        if not _is_timestamp(registered_at) or not _is_timestamp(captured_at):
+            raise TokenAccountingError(
+                f"Reused agent registration timestamps are invalid: {agent_id}"
+            )
+        if _timestamp(captured_at) > _timestamp(registered_at):
+            raise TokenAccountingError(
+                f"Reused agent start_snapshot follows registration: {agent_id}"
+            )
+        failures: list[str] = []
+        _validate_snapshot_source(snapshot, "codex", "reused start_snapshot", failures)
+        if failures:
+            raise TokenAccountingError("; ".join(failures))
 
 
 def _usage_snapshot(
@@ -334,8 +405,37 @@ def _usage_snapshot(
     return snapshot
 
 
-def parse_codex_session(path: Path, session_id: str) -> dict[str, Any]:
+def _session_origin_snapshot(
+    runtime: str,
+    session_id: str,
+    path: Path,
+    captured_at: str,
+) -> dict[str, Any]:
+    snapshot = _usage_snapshot(
+        runtime=runtime,
+        session_id=session_id,
+        usage=zero_usage(reasoning_available=runtime == "codex"),
+        event_ref=f"{runtime}:{session_id}:session-origin",
+        event_sha256=canonical_sha256(
+            {"runtime": runtime, "session_id": session_id, "origin": 0}
+        ),
+        captured_at=captured_at,
+        terminal=False,
+        source_path=path,
+    )
+    if runtime == "claude":
+        snapshot["message_ids"] = []
+    return snapshot
+
+
+def parse_codex_session(
+    path: Path,
+    session_id: str,
+    *,
+    through_timestamp: datetime | None = None,
+) -> dict[str, Any]:
     latest: dict[str, Any] | None = None
+    previous_usage: dict[str, int | None] | None = None
     latest_line = 0
     terminal_line = 0
     terminal_reason: str | None = None
@@ -346,6 +446,13 @@ def parse_codex_session(path: Path, session_id: str) -> dict[str, Any]:
                 item = json.loads(raw)
             except json.JSONDecodeError as exc:
                 raise TokenAccountingError(f"Invalid Codex JSONL at {path}:{line_number}") from exc
+            item_timestamp = item.get("timestamp") if isinstance(item, dict) else None
+            if (
+                through_timestamp is not None
+                and isinstance(item_timestamp, str)
+                and _timestamp(item_timestamp) > through_timestamp
+            ):
+                continue
             last_json_line = line_number
             payload = item.get("payload") if isinstance(item, dict) else None
             if not isinstance(payload, dict):
@@ -359,6 +466,14 @@ def parse_codex_session(path: Path, session_id: str) -> dict[str, Any]:
             if item.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
             info = payload.get("info")
+            if info is None:
+                # Codex may emit an early placeholder before cumulative usage is
+                # available. It is not a zero snapshot and cannot be selected.
+                continue
+            if not isinstance(info, dict):
+                raise TokenAccountingError(
+                    f"Codex token_count info is malformed at {path}:{line_number}"
+                )
             counters = info.get("total_token_usage") if isinstance(info, dict) else None
             if not isinstance(counters, dict):
                 raise TokenAccountingError(f"Codex token_count missing total_token_usage at {path}:{line_number}")
@@ -376,6 +491,14 @@ def parse_codex_session(path: Path, session_id: str) -> dict[str, Any]:
                     raise TokenAccountingError(
                         f"Codex usage field {field} is invalid at {path}:{line_number}"
                     )
+            if previous_usage is not None:
+                for field, value in usage.items():
+                    previous = previous_usage.get(field)
+                    if isinstance(previous, int) and isinstance(value, int) and value < previous:
+                        raise TokenAccountingError(
+                            f"Codex cumulative usage field {field} decreased at {path}:{line_number}"
+                        )
+            previous_usage = usage
             latest_line = line_number
             latest = _usage_snapshot(
                 runtime="codex",
@@ -388,7 +511,9 @@ def parse_codex_session(path: Path, session_id: str) -> dict[str, Any]:
                 source_path=path,
             )
     if latest is None:
-        raise TokenAccountingError(f"No Codex token_count event found for {session_id}")
+        raise TokenAccountingError(
+            f"No complete Codex token_count event found for {session_id}"
+        )
     latest["terminal"] = terminal_line > latest_line and terminal_line == last_json_line
     latest["terminal_reason"] = terminal_reason if latest["terminal"] else None
     return latest
@@ -547,6 +672,13 @@ def start_accounting(
         {
             "runtime": runtime,
             "lead_session_id": lead_session_id,
+            "lead_generations": [
+                {
+                    "generation": 1,
+                    "session_id": lead_session_id,
+                    "started_at": started_at,
+                }
+            ],
             "started_at": started_at,
             "finalized_at": None,
             "participants": [],
@@ -559,6 +691,14 @@ def start_accounting(
         "started_at": started_at,
         "finalized_at": None,
         "lead": {"start": start, "end": None},
+        "leads": [
+            {
+                "generation": 1,
+                "session_id": lead_session_id,
+                "start": start,
+                "end": None,
+            }
+        ],
         "agents": [],
     }
     value["notes"] = [
@@ -570,6 +710,20 @@ def start_accounting(
     return value
 
 
+def register_lead_generation(
+    workflow_dir: Path,
+    *,
+    lead_session_id: str,
+    runtime_root: Path | None = None,
+) -> dict[str, Any]:
+    """Reject portable successor registration; rotation lineage is host-owned."""
+
+    raise TokenAccountingError(
+        "Lead generation rotation requires host-issued lineage evidence and is not "
+        "available in the portable token accounting CLI"
+    )
+
+
 def register_agent(
     workflow_dir: Path,
     *,
@@ -577,6 +731,8 @@ def register_agent(
     agent_id: str,
     round_id: str,
     lane_id: str,
+    runtime_root: Path | None = None,
+    reuse_existing_session: bool = False,
 ) -> dict[str, Any]:
     value = load_object(workflow_dir / "token-usage.json")
     accounting = value.get("accounting")
@@ -591,14 +747,95 @@ def register_agent(
         raise TokenAccountingError("accounting.participants contains a non-object")
     if any(item.get("execution_ref") == execution_ref for item in participants):
         raise TokenAccountingError(f"Duplicate execution_ref: {execution_ref}")
-    participants.append(
-        {
-            "execution_ref": execution_ref,
-            "agent_id": agent_id,
-            "round_id": round_id,
-            "lane_id": lane_id,
-        }
+    runtime = accounting.get("runtime")
+    if runtime not in RUNTIMES:
+        raise TokenAccountingError("Agent registration requires a started native runtime")
+    start_snapshot: dict[str, Any] | None = None
+    if reuse_existing_session:
+        root = (runtime_root or default_runtime_root(runtime)).expanduser().resolve()
+        agent_path = locate_session(runtime, agent_id, root, lead=False)
+        validate_session_identity(runtime, agent_path, agent_id, lead=False)
+        meta = codex_session_meta(agent_path) if runtime == "codex" else claude_session_meta(agent_path)
+        try:
+            start_snapshot = parse_session(runtime, agent_path, agent_id)
+        except TokenAccountingError as exc:
+            if "No complete Codex token_count event" not in str(exc):
+                raise
+            start_snapshot = _session_origin_snapshot(
+                runtime,
+                agent_id,
+                agent_path,
+                str(meta.get("timestamp") or accounting.get("started_at")),
+            )
+        start_snapshot["terminal"] = False
+    participant = {
+        "execution_ref": execution_ref,
+        "agent_id": agent_id,
+        "round_id": round_id,
+        "lane_id": lane_id,
+        "registered_at": utc_now(),
+        "registration_mode": (
+            "reuse_existing_session" if reuse_existing_session else "new_session"
+        ),
+    }
+    if start_snapshot is not None:
+        participant["start_snapshot"] = start_snapshot
+    participants.append(participant)
+    write_object(workflow_dir / "token-usage.json", value)
+    return value
+
+
+def repair_reused_agent_registration(
+    workflow_dir: Path,
+    *,
+    execution_ref: str,
+    runtime_root: Path | None = None,
+) -> dict[str, Any]:
+    """Recover a missing reused-session boundary from its raw registration time.
+
+    This is intentionally narrow: it cannot change identity or registration time,
+    and it fails when a snapshot already exists.
+    """
+
+    value = load_object(workflow_dir / "token-usage.json")
+    accounting = value.get("accounting")
+    if value.get("schema_version") != TOKEN_USAGE_SCHEMA or not isinstance(accounting, dict):
+        raise TokenAccountingError("Registration repair requires token-usage v2")
+    participants = accounting.get("participants")
+    matches = [
+        item for item in participants or []
+        if isinstance(item, dict) and item.get("execution_ref") == execution_ref
+    ]
+    if len(matches) != 1:
+        raise TokenAccountingError("Registration repair requires exactly one execution_ref")
+    participant = matches[0]
+    if isinstance(participant.get("start_snapshot"), dict):
+        raise TokenAccountingError("Registration already has a start_snapshot")
+    runtime = accounting.get("runtime")
+    if runtime != "codex":
+        raise TokenAccountingError("Registration repair currently requires Codex raw JSONL")
+    registered_at = participant.get("registered_at")
+    agent_id = participant.get("agent_id")
+    if not isinstance(registered_at, str) or not _is_timestamp(registered_at):
+        raise TokenAccountingError("Registration repair needs a valid registered_at")
+    if not isinstance(agent_id, str) or not agent_id:
+        raise TokenAccountingError("Registration repair needs agent_id")
+    root = (runtime_root or default_runtime_root(runtime)).expanduser().resolve()
+    agent_path = locate_session(runtime, agent_id, root, lead=False)
+    validate_session_identity(runtime, agent_path, agent_id, lead=False)
+    snapshot = parse_codex_session(
+        agent_path,
+        agent_id,
+        through_timestamp=_timestamp(registered_at),
     )
+    snapshot["terminal"] = False
+    snapshot["terminal_reason"] = None
+    participant["start_snapshot"] = snapshot
+    participant["registration_mode"] = "reuse_existing_session"
+    participant["registration_repair"] = {
+        "source": "raw_session_prefix_at_registered_at",
+        "boundary": registered_at,
+    }
     write_object(workflow_dir / "token-usage.json", value)
     return value
 
@@ -641,20 +878,98 @@ def finalize_accounting(
     if accounting.get("finalized_at") is not None:
         raise TokenAccountingError("Token accounting has already been finalized")
     root = (runtime_root or default_runtime_root(runtime)).expanduser().resolve()
-    lead_path = locate_session(runtime, lead_session_id, root, lead=True)
-    validate_session_identity(runtime, lead_path, lead_session_id, lead=True)
-    lead_end = parse_session(
-        runtime,
-        lead_path,
-        lead_session_id,
-        exclude_trailing_tool_use=runtime == "claude",
-    )
-    lead_start = evidence.get("lead", {}).get("start")
-    if not isinstance(lead_start, dict):
-        raise TokenAccountingError("Token evidence is missing the lead start snapshot")
-    measurements = [
-        _measurement("lead", lead_session_id, ["lead"], lead_start, lead_end)
-    ]
+    generations = accounting.get("lead_generations")
+    if not isinstance(generations, list) or not generations:
+        generations = [
+            {
+                "generation": 1,
+                "session_id": lead_session_id,
+                "started_at": str(accounting.get("started_at")),
+            }
+        ]
+    if not all(isinstance(item, dict) for item in generations):
+        raise TokenAccountingError("accounting.lead_generations must contain objects")
+    if len(generations) != 1:
+        raise TokenAccountingError(
+            "Multiple Lead generations require host-issued lineage evidence and "
+            "terminal host finalization"
+        )
+    evidence_leads = evidence.get("leads")
+    if not isinstance(evidence_leads, list) or len(evidence_leads) != len(generations):
+        legacy_lead = evidence.get("lead")
+        if len(generations) != 1 or not isinstance(legacy_lead, dict):
+            raise TokenAccountingError("Token evidence does not cover every lead generation")
+        evidence_leads = [
+            {
+                "generation": 1,
+                "session_id": lead_session_id,
+                "start": legacy_lead.get("start"),
+                "end": legacy_lead.get("end"),
+            }
+        ]
+    measurements: list[dict[str, Any]] = []
+    finalized_leads: list[dict[str, Any]] = []
+    discovered: set[str] = set()
+    full_codex_descendants: set[str] = set()
+    generation_ids: set[str] = set()
+    lead_refs: list[str] = []
+    for index, (generation, lead_evidence) in enumerate(
+        zip(generations, evidence_leads), start=1
+    ):
+        session_id = generation.get("session_id")
+        generation_number = generation.get("generation")
+        if session_id in generation_ids or not isinstance(session_id, str):
+            raise TokenAccountingError("Lead generation session ids must be unique strings")
+        if generation_number != index:
+            raise TokenAccountingError("Lead generation numbers must be contiguous from one")
+        generation_ids.add(session_id)
+        lead_path = locate_session(runtime, session_id, root, lead=True)
+        validate_session_identity(runtime, lead_path, session_id, lead=True)
+        lead_end = parse_session(
+            runtime,
+            lead_path,
+            session_id,
+            exclude_trailing_tool_use=runtime == "claude" and index == len(generations),
+        )
+        if index < len(generations) and lead_end.get("terminal") is not True:
+            raise TokenAccountingError(
+                f"Predecessor lead generation is not terminal: {session_id}"
+            )
+        lead_start = lead_evidence.get("start") if isinstance(lead_evidence, dict) else None
+        if not isinstance(lead_start, dict):
+            raise TokenAccountingError(
+                f"Token evidence is missing lead generation {index} start snapshot"
+            )
+        lead_ref = "lead" if index == 1 else f"lead:generation-{index:03d}"
+        lead_refs.append(lead_ref)
+        measurements.append(
+            _measurement("lead_generation", session_id, [lead_ref], lead_start, lead_end)
+        )
+        finalized_leads.append(
+            {
+                "generation": index,
+                "session_id": session_id,
+                "start": lead_start,
+                "end": lead_end,
+            }
+        )
+        discovered.update(
+            discover_runtime_agents(
+                runtime,
+                root,
+                session_id,
+                lead_path,
+                str(generation.get("started_at") or accounting.get("started_at")),
+            )
+        )
+        if runtime == "codex":
+            full_codex_descendants.update(
+                discover_codex_descendants(
+                    root,
+                    session_id,
+                    created_at_or_after=None,
+                )
+            )
     participants = accounting.get("participants")
     if not isinstance(participants, list) or not all(isinstance(item, dict) for item in participants):
         raise TokenAccountingError("accounting.participants must be a list of objects")
@@ -665,17 +980,24 @@ def finalize_accounting(
         if not isinstance(agent_id, str) or not isinstance(execution_ref, str):
             raise TokenAccountingError("Every participant needs agent_id and execution_ref")
         by_agent.setdefault(agent_id, []).append(participant)
-    discovered = discover_runtime_agents(
-        runtime,
-        root,
-        lead_session_id,
-        lead_path,
-        str(accounting.get("started_at")),
-    )
+    discovered -= {canonical_agent_id(runtime, item) for item in generation_ids}
     registered = {canonical_agent_id(runtime, agent_id) for agent_id in by_agent}
-    if discovered != registered:
-        missing = sorted(discovered - registered)
-        unknown = sorted(registered - discovered)
+    reused_registered: set[str] = set()
+    if runtime == "codex":
+        for agent_id, records in by_agent.items():
+            if any(record.get("registration_mode") == "reuse_existing_session" for record in records):
+                agent_path = locate_session(runtime, agent_id, root, lead=False)
+                validate_session_identity(runtime, agent_path, agent_id, lead=False)
+                validate_reused_codex_participant(
+                    agent_id,
+                    records,
+                    agent_path,
+                    full_codex_descendants,
+                )
+                reused_registered.add(canonical_agent_id(runtime, agent_id))
+    missing = sorted(discovered - registered)
+    unknown = sorted(registered - discovered - reused_registered)
+    if missing or unknown:
         details = []
         if missing:
             details.append("unregistered runtime agents: " + ", ".join(missing))
@@ -689,18 +1011,27 @@ def finalize_accounting(
         end = parse_session(runtime, agent_path, agent_id)
         if not end.get("terminal"):
             raise TokenAccountingError(f"Agent session is not terminal: {agent_id}")
-        start = _usage_snapshot(
-            runtime=runtime,
-            session_id=agent_id,
-            usage=zero_usage(reasoning_available=runtime == "codex"),
-            event_ref=f"{runtime}:{agent_id}:session-origin",
-            event_sha256=canonical_sha256({"runtime": runtime, "session_id": agent_id, "origin": 0}),
-            captured_at=str(accounting.get("started_at")),
-            terminal=False,
-            source_path=agent_path,
-        )
-        if runtime == "claude":
-            start["message_ids"] = []
+        starts = [record.get("start_snapshot") for record in records]
+        starts = [item for item in starts if isinstance(item, dict)]
+        if starts:
+            start = min(
+                starts,
+                key=lambda item: int(item.get("usage", {}).get("total_tokens", 0)),
+            )
+        else:
+            meta = codex_session_meta(agent_path) if runtime == "codex" else claude_session_meta(agent_path)
+            session_started_at = str(meta.get("timestamp") or "")
+            workflow_started_at = str(accounting.get("started_at") or "")
+            if (
+                session_started_at
+                and workflow_started_at
+                and _timestamp(session_started_at) < _timestamp(workflow_started_at)
+            ):
+                raise TokenAccountingError(
+                    f"Reused agent session predates workflow start but lacks start_snapshot: {agent_id}"
+                )
+            captured_at = str(meta.get("timestamp") or accounting.get("started_at"))
+            start = _session_origin_snapshot(runtime, agent_id, agent_path, captured_at)
         execution_refs = sorted(str(record["execution_ref"]) for record in records)
         measurements.append(_measurement("agent_session", agent_id, execution_refs, start, end))
         agent_evidence.append(
@@ -709,18 +1040,23 @@ def finalize_accounting(
                 "execution_refs": execution_refs,
                 "round_ids": sorted({str(record.get("round_id")) for record in records}),
                 "lane_ids": sorted({str(record.get("lane_id")) for record in records}),
+                "start": start,
                 "end": end,
             }
         )
     aggregate = add_usage([measurement["delta"] for measurement in measurements])
-    expected = ["lead"] + sorted(
+    expected = lead_refs + sorted(
         str(participant["execution_ref"]) for participant in participants
     )
     finalized_at = utc_now()
     evidence.update(
         {
             "finalized_at": finalized_at,
-            "lead": {"start": lead_start, "end": lead_end},
+            "lead": {
+                "start": finalized_leads[0]["start"],
+                "end": finalized_leads[0]["end"],
+            },
+            "leads": finalized_leads,
             "agents": agent_evidence,
         }
     )
@@ -739,8 +1075,9 @@ def finalize_accounting(
             "output_tokens": aggregate["output_tokens"],
             "reasoning_tokens": aggregate["reasoning_tokens"],
             "method": (
-                "Exact actor-delta sum from native runtime session events: lead end minus "
-                "start, plus every registered terminal subagent session total."
+                "Exact actor-delta sum from native runtime session events: every registered "
+                "Lead generation end minus start, plus every registered terminal subagent "
+                "session total."
             ),
             "measurements": measurements,
             "coverage": {
@@ -896,6 +1233,8 @@ def _validate_snapshot_source(
             failures.append(f"{label}.event_sha256 does not match the Codex source event")
         if snapshot.get("usage") != usage:
             failures.append(f"{label}.usage does not match the Codex source event")
+        if snapshot.get("captured_at") != str(item.get("timestamp") or ""):
+            failures.append(f"{label}.captured_at does not match the Codex source event")
         return
     message_ids = snapshot.get("message_ids")
     if not isinstance(message_ids, list) or not all(isinstance(item, str) for item in message_ids):
@@ -972,6 +1311,35 @@ def validate_v2(value: Any, workflow_dir: Path, *, final: bool) -> list[str]:
         failures.append(f"{label} participant execution_ref values must be non-empty strings")
     if len(execution_refs) != len(set(execution_refs)):
         failures.append(f"{label} participant execution_ref values must be unique")
+    lead_generations = accounting.get("lead_generations")
+    accounting_started = accounting.get("started_at") is not None
+    if lead_generations is not None and (accounting_started or final):
+        if not isinstance(lead_generations, list) or not lead_generations:
+            failures.append(f"{label}.accounting.lead_generations must be a non-empty list")
+            lead_generations = []
+        else:
+            generation_ids: set[str] = set()
+            for index, generation in enumerate(lead_generations, start=1):
+                generation_label = f"{label}.accounting.lead_generations[{index - 1}]"
+                if not isinstance(generation, dict):
+                    failures.append(f"{generation_label} must be an object")
+                    continue
+                if generation.get("generation") != index:
+                    failures.append(f"{generation_label}.generation must equal {index}")
+                session_id = generation.get("session_id")
+                if not isinstance(session_id, str) or not session_id or session_id in generation_ids:
+                    failures.append(f"{generation_label}.session_id must be unique and non-empty")
+                else:
+                    generation_ids.add(session_id)
+                if not _is_timestamp(generation.get("started_at")):
+                    failures.append(f"{generation_label}.started_at must be a timestamp")
+            if lead_generations and accounting.get("lead_session_id") != lead_generations[0].get("session_id"):
+                failures.append(f"{label}.accounting.lead_session_id must match generation one")
+            if len(lead_generations) != 1:
+                failures.append(
+                    f"{label}.accounting.lead_generations cannot contain successors "
+                    "without host-issued lineage evidence"
+                )
     if not final:
         return failures
     if value.get("status") != "complete" or value.get("confidence") != "exact":
@@ -993,6 +1361,11 @@ def validate_v2(value: Any, workflow_dir: Path, *, final: bool) -> list[str]:
     subject_ids: set[str] = set()
     measured_refs: list[str] = []
     deltas: list[dict[str, int | None]] = []
+    generation_ids_in_order = [
+        item.get("session_id")
+        for item in lead_generations
+        if isinstance(item, dict) and isinstance(item.get("session_id"), str)
+    ] if isinstance(lead_generations, list) else [accounting.get("lead_session_id")]
     for index, measurement in enumerate(measurements):
         item_label = f"{label}.measurements[{index}]"
         if not isinstance(measurement, dict):
@@ -1034,6 +1407,12 @@ def validate_v2(value: Any, workflow_dir: Path, *, final: bool) -> list[str]:
             _validate_snapshot_source(end, runtime, f"{item_label}.end", failures)
         if measurement.get("subject_kind") == "agent_session" and end.get("terminal") is not True:
             failures.append(f"{item_label} agent end snapshot must be terminal")
+        if (
+            measurement.get("subject_kind") == "lead_generation"
+            and subject_id in generation_ids_in_order[:-1]
+            and end.get("terminal") is not True
+        ):
+            failures.append(f"{item_label} predecessor Lead generation must be terminal")
         if measurement.get("subject_kind") == "agent_session" and runtime in RUNTIMES:
             source_value = end.get("source_path")
             if isinstance(source_value, str) and Path(source_value).is_file():
@@ -1067,7 +1446,11 @@ def validate_v2(value: Any, workflow_dir: Path, *, final: bool) -> list[str]:
     if not isinstance(coverage, dict):
         failures.append(f"{label}.coverage must be an object")
     else:
-        expected = ["lead"] + sorted(ref for ref in execution_refs if isinstance(ref, str))
+        lead_refs = ["lead"] + [
+            f"lead:generation-{index:03d}"
+            for index in range(2, len(generation_ids_in_order) + 1)
+        ]
+        expected = lead_refs + sorted(ref for ref in execution_refs if isinstance(ref, str))
         if coverage.get("expected_execution_refs") != expected:
             failures.append(f"{label}.coverage.expected_execution_refs must match registered attempts")
         if coverage.get("covered_execution_refs") != expected:
@@ -1096,6 +1479,18 @@ def validate_v2(value: Any, workflow_dir: Path, *, final: bool) -> list[str]:
                 lead = evidence.get("lead")
                 if not isinstance(lead, dict) or not lead.get("start") or not lead.get("end"):
                     failures.append(f"{evidence_path} needs lead start and end snapshots")
+                evidence_leads = evidence.get("leads")
+                if not isinstance(evidence_leads, list):
+                    evidence_leads = [
+                        {
+                            "generation": 1,
+                            "session_id": accounting.get("lead_session_id"),
+                            "start": lead.get("start") if isinstance(lead, dict) else None,
+                            "end": lead.get("end") if isinstance(lead, dict) else None,
+                        }
+                    ]
+                if len(evidence_leads) != len(generation_ids_in_order):
+                    failures.append(f"{evidence_path} must cover every Lead generation")
                 agents = evidence.get("agents")
                 expected_agents = {item.get("agent_id") for item in participants}
                 actual_agents = {
@@ -1118,6 +1513,19 @@ def validate_v2(value: Any, workflow_dir: Path, *, final: bool) -> list[str]:
                     )
                 ):
                     failures.append(f"{evidence_path} lead snapshots must match lead measurement")
+                for index, generation in enumerate(evidence_leads, start=1):
+                    if not isinstance(generation, dict):
+                        failures.append(f"{evidence_path}.leads[{index - 1}] must be an object")
+                        continue
+                    expected_id = generation_ids_in_order[index - 1] if index <= len(generation_ids_in_order) else None
+                    measurement = measurement_by_subject.get(expected_id)
+                    if generation.get("generation") != index or generation.get("session_id") != expected_id:
+                        failures.append(f"{evidence_path}.leads[{index - 1}] identity drift")
+                    elif not isinstance(measurement, dict) or (
+                        measurement.get("start") != generation.get("start")
+                        or measurement.get("end") != generation.get("end")
+                    ):
+                        failures.append(f"{evidence_path}.leads[{index - 1}] must match its measurement")
                 if isinstance(agents, list):
                     for agent in agents:
                         if not isinstance(agent, dict):
@@ -1150,6 +1558,15 @@ def parse_args() -> argparse.Namespace:
     register.add_argument("--agent-id", required=True)
     register.add_argument("--round-id", required=True)
     register.add_argument("--lane-id", required=True)
+    register.add_argument("--runtime-root", type=Path)
+    register.add_argument("--reuse-existing-session", action="store_true")
+    repair_registration = subparsers.add_parser(
+        "repair-reuse-registration",
+        help="Recover a missing reused-session snapshot at the recorded registration time",
+    )
+    repair_registration.add_argument("workflow_dir", type=Path)
+    repair_registration.add_argument("--execution-ref", required=True)
+    repair_registration.add_argument("--runtime-root", type=Path)
     finalize = subparsers.add_parser("finalize", help="Compute the exact runtime event delta")
     finalize.add_argument("workflow_dir", type=Path)
     finalize.add_argument("--runtime-root", type=Path)
@@ -1177,8 +1594,17 @@ def main() -> int:
                 agent_id=args.agent_id,
                 round_id=args.round_id,
                 lane_id=args.lane_id,
+                runtime_root=args.runtime_root,
+                reuse_existing_session=args.reuse_existing_session,
             )
             print(f"Registered token participant: {args.execution_ref} -> {args.agent_id}")
+        elif args.command == "repair-reuse-registration":
+            repair_reused_agent_registration(
+                args.workflow_dir,
+                execution_ref=args.execution_ref,
+                runtime_root=args.runtime_root,
+            )
+            print(f"Repaired reused-session boundary: {args.execution_ref}")
         else:
             value = finalize_accounting(args.workflow_dir, runtime_root=args.runtime_root)
             print(f"Exact workflow tokens: {value['total_tokens']:,}")

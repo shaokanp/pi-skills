@@ -455,6 +455,18 @@ def bind_input_refs(workflow_dir: Path, orchestration: dict[str, Any]) -> int:
         for lane in round_plan.get("lanes", []):
             if not isinstance(lane, dict) or lane.get("enabled") is not True:
                 continue
+            transport_state = lane_transport_state(
+                workflow_dir,
+                str(round_plan.get("round_id")),
+                lane,
+            )
+            if transport_state == "partial":
+                raise ExecutionEfficiencyError(
+                    f"{round_plan.get('round_id')}:{lane.get('id')} has partial terminal "
+                    "transport; preserve its dispatch and repair the missing output or receipt"
+                )
+            if transport_state == "terminal":
+                continue
             refs = lane.get("input_refs")
             if not isinstance(refs, list):
                 raise ExecutionEfficiencyError(f"{lane.get('id')}.input_refs must be a list")
@@ -508,6 +520,8 @@ def validate_bound_input_refs(
     workspace_root: Path,
     refs: Any,
     label: str,
+    *,
+    check_content: bool = True,
 ) -> None:
     if not isinstance(refs, list) or not 1 <= len(refs) <= 12:
         raise ExecutionEfficiencyError(f"{label} must contain 1..12 bounded references")
@@ -518,19 +532,63 @@ def validate_bound_input_refs(
         _require_keys(item, ("root", "path", "content_sha256"), ref_label)
         root_name = _require_nonempty(item["root"], f"{ref_label}.root")
         relative = safe_relative_path(item["path"], f"{ref_label}.path")
+        if root_name not in {"workflow", "workspace"}:
+            raise ExecutionEfficiencyError(
+                f"{ref_label}.root must be workflow or workspace"
+            )
+        digest = item.get("content_sha256")
+        if (
+            not isinstance(digest, str)
+            or not digest.startswith("sha256:")
+            or len(digest) != 71
+        ):
+            raise ExecutionEfficiencyError(
+                f"{ref_label}.content_sha256 must be a sha256 digest"
+            )
         key = (root_name, relative)
         if key in seen:
             raise ExecutionEfficiencyError(f"{ref_label} duplicates another input reference")
         seen.add(key)
-        resolved = _resolve_input_ref(
-            workflow_dir,
-            workspace_root,
-            root_name,
-            relative,
-            ref_label,
-        )
-        if item["content_sha256"] != file_sha256(resolved):
-            raise ExecutionEfficiencyError(f"{ref_label}.content_sha256 does not match the file")
+        if check_content:
+            resolved = _resolve_input_ref(
+                workflow_dir,
+                workspace_root,
+                root_name,
+                relative,
+                ref_label,
+            )
+            if digest != file_sha256(resolved):
+                raise ExecutionEfficiencyError(
+                    f"{ref_label}.content_sha256 does not match the file"
+                )
+
+
+def lane_transport_state(
+    workflow_dir: Path,
+    round_id: str,
+    lane: dict[str, Any],
+) -> str:
+    """Return none, partial, or terminal for immutable lane result transport."""
+
+    lane_id = str(lane.get("id"))
+    execution = lane.get("execution")
+    output_relative = (
+        execution.get("output_path")
+        if isinstance(execution, dict)
+        else _lane_output_path(round_id, lane_id)
+    )
+    output_exists = (
+        isinstance(output_relative, str)
+        and (workflow_dir / output_relative).is_file()
+    )
+    receipt_exists = (
+        workflow_dir / f"rounds/{round_id}/receipts/{lane_id}.json"
+    ).is_file()
+    if output_exists and receipt_exists:
+        return "terminal"
+    if output_exists or receipt_exists:
+        return "partial"
+    return "none"
 
 
 def _dispatch_digest_input(lane: dict[str, Any], round_id: str) -> dict[str, Any]:
@@ -624,6 +682,7 @@ def validate_lane_execution(
     workflow_dir: Path | None = None,
     workspace_root: Path | None = None,
     workflow_contract_digest: str | None = None,
+    check_input_content: bool = True,
 ) -> dict[str, Any]:
     label = f"{round_id}:{lane.get('id')}.execution"
     execution = _require_object(lane.get("execution"), label)
@@ -711,6 +770,7 @@ def validate_lane_execution(
                 workspace_root,
                 input_refs,
                 f"{label}.input_refs",
+                check_content=check_input_content,
             )
         else:
             if not isinstance(input_refs, list) or not 1 <= len(input_refs) <= 12:
@@ -764,6 +824,7 @@ def validate_orchestration_efficiency(
     *,
     allow_draft: bool,
     workflow_dir: Path | None = None,
+    allow_terminal_input_drift: bool = False,
 ) -> dict[str, dict[str, Any]]:
     lanes_by_ref: dict[str, dict[str, Any]] = {}
     enabled_types: set[str] = set()
@@ -792,6 +853,10 @@ def validate_orchestration_efficiency(
             lane_ref = f"{round_id}:{lane_id}"
             if lane_ref in lanes_by_ref:
                 raise ExecutionEfficiencyError(f"duplicate execution lane ref: {lane_ref}")
+            terminal_transport = (
+                workflow_dir is not None
+                and lane_transport_state(workflow_dir, round_id, lane) == "terminal"
+            )
             validate_lane_execution(
                 lane,
                 round_id,
@@ -801,6 +866,9 @@ def validate_orchestration_efficiency(
                 workflow_dir=workflow_dir if not allow_draft else None,
                 workspace_root=workspace_root,
                 workflow_contract_digest=contract_digest,
+                check_input_content=not (
+                    allow_terminal_input_drift and terminal_transport
+                ),
             )
             lanes_by_ref[lane_ref] = lane
             lane_type = _require_nonempty(lane.get("lane"), f"{lane_ref}.lane")

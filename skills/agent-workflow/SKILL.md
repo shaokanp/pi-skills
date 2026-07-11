@@ -12,7 +12,10 @@ This skill does not rely on shelling out from one agent runtime to another. The 
 
 ## Core Contract
 
-- The lead agent owns orchestration, integration, final writes, and final claims.
+- For new Codex native workflows, Main creates exactly one clean Orchestrator
+  session with `fork_turns=none`; that Orchestrator is the workflow Lead and
+  owns orchestration, integration, final writes, and final claims. Main does
+  not fan out to worker lanes or receive nested worker events.
 - The orchestrator is a plan compiler, not a normal worker lane. It decides the workflow shape before any lane runs, then revises the shape between rounds when verification fails.
 - Use a planner-first approach. Templates may inform the plan, but the orchestrator must decide lanes, agent count, prompts, budgets, stop conditions, and gates from the current goal and evidence.
 - Use the smallest harness that materially raises confidence. A chat-level workflow is enough for small tasks; create a `.workflow/<slug>/` run workspace for explicit agent-team workflows, multi-round work, broad ambiguity, high risk, or reusable coordination state.
@@ -22,6 +25,38 @@ This skill does not rely on shelling out from one agent runtime to another. The 
 - Scripts scaffold, summarize, and validate run workspaces. They do not spawn subagents.
 - For native subagent, agent-team, swarm, dynamic workflow, or multi-agent simulated workflows, show a compact left-rail Swarm Card before dispatch and on meaningful state transitions so the user can see the team shape without reading raw orchestration files. Label native, simulated, and lead-owned work honestly.
 - Final workflow summaries must include exact, runtime-event-backed workflow token usage. New workspaces use token-usage v2 and must fail closed when native usage events are unavailable; never substitute a Lead or Goal counter estimate and label it exact. Existing token-usage v1 estimated workspaces remain readable for compatibility.
+
+## Default Clean Orchestrator Runtime
+
+New Codex native workspaces activate the Clean Orchestrator contract by
+default; this is not a model-routing or token-optimization opt-in. Main passes a
+compact, digest-bound packet to one isolated Orchestrator. Nested lanes also use
+isolated, digest-bound context and return compact receipts. Legacy Main-led
+fan-out and wrapper polling are forbidden production fallbacks when this
+contract is active.
+
+The portable skill owns schemas, capability negotiation, admission arithmetic,
+sealed semantic gates, completion-density budgets, deterministic controller
+operations, exact-event accounting, validators, and honest runtime labels. It
+does not implement or simulate host primitives. Atomic `run_orchestrator`, a
+true all-terminal durable barrier, queued native dispatch, generation rotation,
+automatic native session registration, and terminal host finalization remain
+host-owned capabilities.
+
+Before dispatch, read `Clean Orchestrator Runtime Artifacts` in
+`references/workflow-artifacts.md`. A structured host snapshot must yield one
+of these outcomes:
+
+- `target`: all required host primitives and declared bounds pass;
+- `bounded_interim`: clean context, direct terminal-event wait, subtree
+  discovery, exact cumulative token events, and deadline/capacity/token/
+  completion bounds pass, while missing target primitives remain explicit;
+- unsupported: fail closed before spawn.
+
+Unknown capability fields, a deadline above the native wait ceiling, fan-out
+above available slots without host-owned queued dispatch, or worst-case token/
+completion estimates above the declared maxima all reject dispatch. Do not add
+another Coordinator agent to mimic all-terminal await.
 
 ## Native Runner Adapters
 
@@ -44,12 +79,25 @@ Runner rules:
 
 ### Exact Token Accounting
 
-New workspaces use fail-closed `agent-workflow.token-usage.v2`. Before the first dispatch, read the `token-usage.json` section of `references/workflow-artifacts.md` and follow its start, per-spawn registration, terminal-agent, and accounting-only finalize sequence exactly. Perform no workflow work after finalization.
+New workspaces use fail-closed `agent-workflow.token-usage.v2` and leave its accounting boundary unstarted while static workspace work is prepared. Before the first dispatch, read the `token-usage.json` section of `references/workflow-artifacts.md`, finish the plan, orchestration, report template, static evidence, runner skeleton, and `accounting-start.json`, then call `workflow_controller.py start <workflow-dir>` once. A fresh scaffold intentionally has no `token-evidence.json`; the compound start creates it from the native snapshot and must not require a fake placeholder. That operation prepares digest-bound dispatch, validates planned mode, renders the card when present, captures the Lead snapshot only after those static steps, registers every declared attempt, and emits one typed receipt. Its `original_ledger_state` binds each pre-transaction ledger as `present: false` or `present: true` plus the exact SHA-256. The two-ledger commit restores that recorded state on replacement failure, including removing only evidence newly created by the failed transaction. Early Codex `token_count.info = null` events are incomplete snapshots; continue to the last complete cumulative snapshot and fail if none exists. Register every descendant attempt and reconcile the discovered runtime subtree before finalization. Reused pre-boundary Codex identities require both a raw start snapshot and membership in the current Lead's complete raw parent lineage; unrelated reuse still fails closed. During collect, accept the declared author's anchored `Message Type: FINAL_ANSWER` after the unique follow-up and before the next non-collaboration action, whether it appears immediately before or after the non-timeout wait output; stale, wrong-author, nonterminal, and wait-output-only evidence still fail closed. Perform no workflow work after the terminal controller finalization operation.
 Never label Lead counters, estimates, or incomplete runtime events as exact; final reports describe runtime-session-event deltas as lead-recorded provenance, not independent billing attestation.
+Clean Orchestrator final mode also requires `runtime_harness.py` to reopen the
+raw Lead JSONL and derive every in-boundary completion, input context, class,
+round density, and forbidden wake count. `runner-evidence.json` is only the
+digest-bound projection of that replay; hand-written counts cannot pass.
 
 ### Default Native Execution Efficiency
 
 New Codex and Claude Code native workflows enable execution efficiency automatically; manual simulation and existing workspaces remain unchanged. Read `Default Native Execution-Efficiency Artifacts` in `references/workflow-artifacts.md` and follow lane admission, isolated context, digest-bound dispatch, notification-first waits, receipt transport, budgets, identity independence, and planned/executed/final validation. Use `--execution-efficiency off` only as an explicit compatibility rollback; no artifact migration is required.
+
+For active Clean Orchestrator workspaces, execution efficiency is subordinate
+to the sealed round contract. Every round declares its purpose, lanes,
+`semantic_return_gate`, compound operation, deterministic steps, and absolute
+completion budget before dispatch. Target rounds plan one result reactivation
+and zero housekeeping, status-only, wrapper-wait, partial-terminal,
+deterministic-result, or sibling-terminal wakes. Bounded interim records every
+native sibling-terminal and deterministic-result reactivation separately and
+cannot present those exceptions as target behavior.
 
 ### Opt-In Codex Model Routing
 
@@ -96,6 +144,11 @@ For native subagent or multi-agent workflows, emit the `PREVIEW` Swarm Card afte
 
 Read `references/workflow-artifacts.md` before writing or validating run workspace files.
 
+For a new Codex native run, first compile the compact Main-to-Orchestrator
+packet and the structured capability/admission contract. Do not dispatch any
+lane until the round's semantic gate graph and completion budget are
+digest-sealed and `verify_workflow.py --mode planned` passes.
+
 Use the other references only when their branch is active:
 
 - Read `references/reviewer-prompts.md` when native subagents or main-thread simulations need lane prompts.
@@ -132,11 +185,15 @@ Use `roundtable` as a reusable reasoning lane before planning, after review or v
 
 A round is one orchestration cycle:
 
-1. The orchestrator writes or updates the round plan.
+1. The clean Orchestrator writes or updates the round plan and seals its
+   semantic gate graph before dispatch.
 2. Enabled lanes run with self-contained, digest-bound prompts and JSON output contracts. When execution efficiency is enabled, native lanes use isolated context and write their full result to the declared artifact path.
 3. The lead validates lane JSON and requests one JSON repair if needed.
 4. Integration summarizes findings, conflicts, accepted work, rejected work, and repair packets.
 5. Independent `verify` and/or `challenge` decides whether the round passes, needs repair, needs more discovery/roundtable, is blocked, or requires a human gate.
+6. Compare planned completion density with the runtime-event ledger. Target
+   rounds fail on any forbidden or excess wake. Bounded interim rounds type
+   every native exception and still enforce their absolute admission bounds.
 
 For routed lanes, the lead appends each dispatch result to the lane's attempt ledger before deciding on retry, fallback, escalation, repair, or a human gate. The terminal actual route comes from the final completed attempt and must equal the dispatched route; silent model substitution or any lane-specific effort change fails validation.
 
@@ -144,7 +201,7 @@ Use actual subagents only through the selected native runner adapter. If the run
 
 Prefer read/review/challenge agents over parallel writers. If multiple agents write, isolate ownership and have the lead inspect, integrate, and verify before accepting the changes.
 
-When card display is active, update the Swarm Card only on meaningful transitions: first dispatch, phase status change, material agent failure/blocker, integration gate, round transition, and final stop. Avoid periodic status completions and heartbeat redraws; a native long wait is not a reason to spend another lead turn.
+When card display is active, update the Swarm Card only on meaningful transitions: first dispatch, phase status change, material agent failure/blocker, integration gate, round transition, and final stop. Avoid periodic status completions and heartbeat redraws; a native long wait is not a reason to spend another Orchestrator turn. Target mode returns once at all-terminal; bounded interim uses direct event-driven terminal waits only, records each sibling return, and never uses wrappers or status polling.
 
 Integration is not a worker lane in v1. The lead agent writes the authoritative
 `integration.json` and `integration.md` ledgers after reading lane outputs.
@@ -194,5 +251,22 @@ Before the final answer:
 2. Run the strongest practical validation for the actual change.
 3. Use `scripts/verify_workflow.py --mode scaffold|executed|final` for run workspace validation when run-workspace mode is active. Final claims require `--mode final`; a bare verifier call is not final evidence. Final mode requires terminal state consistency, verification evidence, substantive final report content, and typed `P2+` finding resolutions.
 4. Say what actually ran, what was simulated, which gates passed or remained open, and what risk remains.
+
+Prepare the complete terminal report and response before exact accounting.
+For Clean Orchestrator runs, also prepare every static workspace artifact before
+the accounting boundary and use `workflow_controller.py start <workflow-dir>`
+as the single pre-dispatch tool operation. Its internal subprocesses are
+deterministic program work, not model completions, and it does not spawn, wait,
+join, queue, rotate, or finalize native agents.
+When the portable controller is available, make
+`workflow_controller.py finalize <workflow-dir>` the last tool operation: it
+runs raw completion replay, the final executed gate, exact runtime-session
+accounting, runtime-observation reconciliation, binds the exact token markers
+into the prepared report, and performs final workflow validation in one compound
+staging transaction, writes the five projections with per-file atomic replacement,
+then commits a digest-bound revision manifest last. Final validation rejects a
+missing or mixed manifest revision. This is source-owned transaction ordering,
+not bundle or host-terminal atomicity; the finalizer completion and final
+user-facing response remain outside the sealed token boundary.
 
 Stop when the user's requested work is handled, high-severity findings are resolved or explicitly deferred, and the final answer reflects verified evidence rather than orchestration theater.

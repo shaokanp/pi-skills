@@ -1,0 +1,14 @@
+{
+  "schema_version": "agent-workflow.runtime-harness-scenario.v1",
+  "name": "normal_two_round",
+  "kind": "raw_completion_replay",
+  "rounds": ["round-001", "round-002"],
+  "events": [
+    {"round_id": "round-001", "tool": "collaboration.spawn_agent", "output": "spawned reviewer-a"},
+    {"round_id": "round-001", "tool": "collaboration.wait_agent", "output": "reviewer-a completed final"},
+    {"round_id": "round-002", "tool": "collaboration.spawn_agent", "output": "spawned verifier-b"},
+    {"round_id": "round-002", "tool": "collaboration.wait_agent", "output": "verifier-b completed final", "omit_round_marker": true}
+  ],
+  "expected_classes": {"initial_dispatch": 2, "decision_gate": 2},
+  "expected_status_wrapper_partial": 0
+}

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import importlib
 import json
 import os
 import subprocess
@@ -18,6 +19,18 @@ import verify_workflow
 
 
 NEW_WORKFLOW = Path(__file__).with_name("new_workflow.py")
+
+
+def load_tests(
+    loader: unittest.TestLoader,
+    tests: unittest.TestSuite,
+    pattern: str | None,
+) -> unittest.TestSuite:
+    """Keep Clean Orchestrator regressions inside the existing release gate."""
+
+    for module_name in ("test_clean_orchestrator", "test_runtime_harness"):
+        tests.addTests(loader.loadTestsFromModule(importlib.import_module(module_name)))
+    return tests
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -121,6 +134,302 @@ class TokenAccountingTests(unittest.TestCase):
         workflow.mkdir()
         write_json(workflow / "token-usage.json", token_accounting.new_token_usage())
         return workflow
+
+    def test_codex_early_info_null_uses_later_complete_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout-session.jsonl"
+            append_json(path, codex_meta("session", "2026-07-10T00:00:00Z"))
+            append_json(
+                path,
+                {
+                    "timestamp": "2026-07-10T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": None},
+                },
+            )
+            append_json(
+                path,
+                codex_token_event(
+                    "2026-07-10T00:00:02Z",
+                    input_tokens=20,
+                    cached_input_tokens=4,
+                    output_tokens=5,
+                    reasoning_tokens=1,
+                ),
+            )
+            snapshot = token_accounting.parse_codex_session(path, "session")
+            self.assertEqual(25, snapshot["usage"]["total_tokens"])
+            self.assertTrue(snapshot["event_ref"].endswith(":token_count:3"))
+
+    def test_reused_codex_agent_counts_only_post_registration_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = root / "codex"
+            sessions = runtime / "sessions"
+            sessions.mkdir(parents=True)
+            workflow = self.workflow(root)
+            lead_path = sessions / "lead.jsonl"
+            agent_path = sessions / "agent.jsonl"
+            append_json(lead_path, codex_meta("lead", "2099-07-10T00:00:00Z"))
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:01Z", input_tokens=100, cached_input_tokens=50, output_tokens=10, reasoning_tokens=2))
+            append_json(agent_path, codex_meta("agent", "2020-07-10T00:00:02Z", parent_id="lead"))
+            append_json(agent_path, codex_token_event("2025-07-10T00:00:03Z", input_tokens=50, cached_input_tokens=20, output_tokens=5, reasoning_tokens=1))
+            append_json(agent_path, {"timestamp":"2025-07-10T00:00:04Z","type":"event_msg","payload":{"type":"task_complete"}})
+            token_accounting.start_accounting(workflow, runtime="codex", lead_session_id="lead", runtime_root=runtime)
+            token_accounting.register_agent(
+                workflow,
+                execution_ref="round-001:verify-01:attempt-2",
+                agent_id="agent",
+                round_id="round-001",
+                lane_id="verify-01",
+                runtime_root=runtime,
+                reuse_existing_session=True,
+            )
+            append_json(agent_path, codex_token_event("2099-07-10T00:00:05Z", input_tokens=80, cached_input_tokens=30, output_tokens=10, reasoning_tokens=2))
+            append_json(agent_path, {"timestamp":"2099-07-10T00:00:06Z","type":"event_msg","payload":{"type":"task_complete"}})
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:07Z", input_tokens=200, cached_input_tokens=100, output_tokens=20, reasoning_tokens=4))
+            value = token_accounting.finalize_accounting(workflow, runtime_root=runtime)
+            self.assertEqual(145, value["total_tokens"])
+            self.assertEqual(35, value["agent_breakdown"][0]["tokens"])
+
+    def test_old_unrelated_reused_codex_session_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = root / "codex"
+            sessions = runtime / "sessions"
+            sessions.mkdir(parents=True)
+            workflow = self.workflow(root)
+            lead_path = sessions / "lead.jsonl"
+            agent_path = sessions / "outsider.jsonl"
+            append_json(lead_path, codex_meta("lead", "2099-07-10T00:00:00Z"))
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:01Z", input_tokens=100, cached_input_tokens=50, output_tokens=10, reasoning_tokens=2))
+            append_json(agent_path, codex_meta("outsider", "2020-07-10T00:00:02Z", parent_id="other-lead"))
+            append_json(agent_path, codex_token_event("2025-07-10T00:00:03Z", input_tokens=50, cached_input_tokens=20, output_tokens=5, reasoning_tokens=1))
+            append_json(agent_path, {"timestamp":"2025-07-10T00:00:04Z","type":"event_msg","payload":{"type":"task_complete"}})
+            token_accounting.start_accounting(workflow, runtime="codex", lead_session_id="lead", runtime_root=runtime)
+            token_accounting.register_agent(
+                workflow,
+                execution_ref="round-001:verify-01:attempt-2",
+                agent_id="outsider",
+                round_id="round-001",
+                lane_id="verify-01",
+                runtime_root=runtime,
+                reuse_existing_session=True,
+            )
+            append_json(agent_path, codex_token_event("2099-07-10T00:00:05Z", input_tokens=80, cached_input_tokens=30, output_tokens=10, reasoning_tokens=2))
+            append_json(agent_path, {"timestamp":"2099-07-10T00:00:06Z","type":"event_msg","payload":{"type":"task_complete"}})
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:07Z", input_tokens=200, cached_input_tokens=100, output_tokens=20, reasoning_tokens=4))
+            with self.assertRaisesRegex(
+                token_accounting.TokenAccountingError,
+                "not a raw-attested descendant",
+            ):
+                token_accounting.finalize_accounting(workflow, runtime_root=runtime)
+
+    def test_unregistered_new_child_below_old_reused_parent_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = root / "codex"
+            sessions = runtime / "sessions"
+            sessions.mkdir(parents=True)
+            workflow = self.workflow(root)
+            lead_path = sessions / "lead.jsonl"
+            reused_path = sessions / "reused.jsonl"
+            child_path = sessions / "child.jsonl"
+            append_json(lead_path, codex_meta("lead", "2099-07-10T00:00:00Z"))
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:01Z", input_tokens=100, cached_input_tokens=50, output_tokens=10, reasoning_tokens=2))
+            append_json(reused_path, codex_meta("reused", "2020-07-10T00:00:02Z", parent_id="lead"))
+            append_json(reused_path, codex_token_event("2025-07-10T00:00:03Z", input_tokens=50, cached_input_tokens=20, output_tokens=5, reasoning_tokens=1))
+            append_json(reused_path, {"timestamp":"2025-07-10T00:00:04Z","type":"event_msg","payload":{"type":"task_complete"}})
+            token_accounting.start_accounting(workflow, runtime="codex", lead_session_id="lead", runtime_root=runtime)
+            token_accounting.register_agent(
+                workflow,
+                execution_ref="round-001:verify-01:attempt-2",
+                agent_id="reused",
+                round_id="round-001",
+                lane_id="verify-01",
+                runtime_root=runtime,
+                reuse_existing_session=True,
+            )
+            append_json(reused_path, codex_token_event("2099-07-10T00:00:05Z", input_tokens=80, cached_input_tokens=30, output_tokens=10, reasoning_tokens=2))
+            append_json(reused_path, {"timestamp":"2099-07-10T00:00:06Z","type":"event_msg","payload":{"type":"task_complete"}})
+            append_json(child_path, codex_meta("child", "2099-07-10T00:00:05Z", parent_id="reused"))
+            append_json(child_path, codex_token_event("2099-07-10T00:00:06Z", input_tokens=20, cached_input_tokens=5, output_tokens=3, reasoning_tokens=1))
+            append_json(child_path, {"timestamp":"2099-07-10T00:00:07Z","type":"event_msg","payload":{"type":"task_complete"}})
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:08Z", input_tokens=200, cached_input_tokens=100, output_tokens=20, reasoning_tokens=4))
+            with self.assertRaisesRegex(
+                token_accounting.TokenAccountingError,
+                "unregistered runtime agents: child",
+            ):
+                token_accounting.finalize_accounting(workflow, runtime_root=runtime)
+
+    def test_reused_snapshot_captured_at_tampering_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = root / "codex"
+            sessions = runtime / "sessions"
+            sessions.mkdir(parents=True)
+            workflow = self.workflow(root)
+            lead_path = sessions / "lead.jsonl"
+            agent_path = sessions / "agent.jsonl"
+            append_json(lead_path, codex_meta("lead", "2099-07-10T00:00:00Z"))
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:01Z", input_tokens=100, cached_input_tokens=50, output_tokens=10, reasoning_tokens=2))
+            append_json(agent_path, codex_meta("agent", "2020-07-10T00:00:02Z", parent_id="lead"))
+            append_json(agent_path, codex_token_event("2025-07-10T00:00:03Z", input_tokens=50, cached_input_tokens=20, output_tokens=5, reasoning_tokens=1))
+            append_json(agent_path, {"timestamp":"2025-07-10T00:00:04Z","type":"event_msg","payload":{"type":"task_complete"}})
+            token_accounting.start_accounting(workflow, runtime="codex", lead_session_id="lead", runtime_root=runtime)
+            token_accounting.register_agent(
+                workflow,
+                execution_ref="round-001:verify-01:attempt-2",
+                agent_id="agent",
+                round_id="round-001",
+                lane_id="verify-01",
+                runtime_root=runtime,
+                reuse_existing_session=True,
+            )
+            usage = token_accounting.load_object(workflow / "token-usage.json")
+            usage["accounting"]["participants"][0]["start_snapshot"]["captured_at"] = "2024-07-10T00:00:03Z"
+            write_json(workflow / "token-usage.json", usage)
+            append_json(agent_path, codex_token_event("2099-07-10T00:00:05Z", input_tokens=80, cached_input_tokens=30, output_tokens=10, reasoning_tokens=2))
+            append_json(agent_path, {"timestamp":"2099-07-10T00:00:06Z","type":"event_msg","payload":{"type":"task_complete"}})
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:07Z", input_tokens=200, cached_input_tokens=100, output_tokens=20, reasoning_tokens=4))
+            with self.assertRaisesRegex(
+                token_accounting.TokenAccountingError,
+                "captured_at does not match",
+            ):
+                token_accounting.finalize_accounting(workflow, runtime_root=runtime)
+
+    def test_reused_registration_repair_uses_recorded_time_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = root / "codex"
+            sessions = runtime / "sessions"
+            sessions.mkdir(parents=True)
+            workflow = self.workflow(root)
+            lead_path = sessions / "lead.jsonl"
+            agent_path = sessions / "agent.jsonl"
+            append_json(lead_path, codex_meta("lead", "2099-07-10T00:00:00Z"))
+            append_json(lead_path, codex_token_event("2099-07-10T00:00:01Z", input_tokens=10, cached_input_tokens=1, output_tokens=1, reasoning_tokens=0))
+            append_json(agent_path, codex_meta("agent", "2099-07-09T00:00:00Z", parent_id="lead"))
+            append_json(agent_path, codex_token_event("2099-07-10T00:00:02Z", input_tokens=20, cached_input_tokens=2, output_tokens=2, reasoning_tokens=0))
+            token_accounting.start_accounting(workflow, runtime="codex", lead_session_id="lead", runtime_root=runtime)
+            usage = json.loads((workflow / "token-usage.json").read_text())
+            usage["accounting"]["participants"] = [{
+                "execution_ref": "round-001:verify-01:attempt-002",
+                "agent_id": "agent",
+                "round_id": "round-001",
+                "lane_id": "verify-01",
+                "registered_at": "2099-07-10T00:00:03Z",
+            }]
+            (workflow / "token-usage.json").write_text(json.dumps(usage) + "\n")
+            append_json(agent_path, codex_token_event("2099-07-10T00:00:04Z", input_tokens=50, cached_input_tokens=5, output_tokens=5, reasoning_tokens=1))
+            repaired = token_accounting.repair_reused_agent_registration(
+                workflow,
+                execution_ref="round-001:verify-01:attempt-002",
+                runtime_root=runtime,
+            )
+            participant = repaired["accounting"]["participants"][0]
+            self.assertEqual(22, participant["start_snapshot"]["usage"]["total_tokens"])
+            self.assertEqual("reuse_existing_session", participant["registration_mode"])
+
+    def test_codex_info_null_only_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout-session.jsonl"
+            append_json(path, codex_meta("session", "2026-07-10T00:00:00Z"))
+            append_json(
+                path,
+                {
+                    "timestamp": "2026-07-10T00:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": None},
+                },
+            )
+            with self.assertRaisesRegex(
+                token_accounting.TokenAccountingError,
+                "No complete Codex token_count event",
+            ):
+                token_accounting.parse_codex_session(path, "session")
+
+    def test_codex_cumulative_usage_must_be_monotonic(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "rollout-session.jsonl"
+            append_json(path, codex_meta("session", "2026-07-10T00:00:00Z"))
+            append_json(
+                path,
+                codex_token_event(
+                    "2026-07-10T00:00:01Z",
+                    input_tokens=20,
+                    cached_input_tokens=4,
+                    output_tokens=5,
+                    reasoning_tokens=1,
+                ),
+            )
+            append_json(
+                path,
+                codex_token_event(
+                    "2026-07-10T00:00:02Z",
+                    input_tokens=19,
+                    cached_input_tokens=4,
+                    output_tokens=5,
+                    reasoning_tokens=1,
+                ),
+            )
+            with self.assertRaisesRegex(
+                token_accounting.TokenAccountingError,
+                "cumulative usage field input_tokens decreased",
+            ):
+                token_accounting.parse_codex_session(path, "session")
+
+    def test_portable_successor_generation_registration_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(
+                token_accounting.TokenAccountingError,
+                "requires host-issued lineage evidence",
+            ):
+                token_accounting.register_lead_generation(
+                    Path(temp) / "workflow",
+                    lead_session_id="unrelated-session",
+                )
+
+    def test_finalizer_rejects_unattested_successor_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime = root / "codex"
+            workflow = self.workflow(root)
+            lead_path = runtime / "sessions" / "rollout-lead.jsonl"
+            append_json(lead_path, codex_meta("lead", "2026-07-10T00:00:00Z"))
+            append_json(
+                lead_path,
+                codex_token_event(
+                    "2026-07-10T00:00:01Z",
+                    input_tokens=10,
+                    cached_input_tokens=0,
+                    output_tokens=2,
+                    reasoning_tokens=0,
+                ),
+            )
+            token_accounting.start_accounting(
+                workflow,
+                runtime="codex",
+                lead_session_id="lead",
+                runtime_root=runtime,
+            )
+            value = token_accounting.load_object(workflow / "token-usage.json")
+            value["accounting"]["lead_generations"].append(
+                {
+                    "generation": 2,
+                    "session_id": "unrelated-session",
+                    "started_at": "2026-07-10T00:00:02Z",
+                }
+            )
+            write_json(workflow / "token-usage.json", value)
+            with self.assertRaisesRegex(
+                token_accounting.TokenAccountingError,
+                "Multiple Lead generations require host-issued lineage evidence",
+            ):
+                token_accounting.finalize_accounting(
+                    workflow,
+                    runtime_root=runtime,
+                )
 
     def test_codex_actor_deltas_include_lead_and_terminal_agents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -226,7 +535,7 @@ class TokenAccountingTests(unittest.TestCase):
                 any("does not match the Codex source event" in failure for failure in source_failures)
             )
 
-    def test_new_workflow_auto_starts_codex_accounting(self) -> None:
+    def test_new_workflow_defers_codex_accounting_until_compound_start(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             runtime = root / "codex"
@@ -267,9 +576,10 @@ class TokenAccountingTests(unittest.TestCase):
             value = token_accounting.load_object(
                 root / "workflows" / "auto-exact" / "token-usage.json"
             )
-            self.assertEqual("codex", value["accounting"]["runtime"])
-            self.assertEqual("auto-lead", value["accounting"]["lead_session_id"])
-            self.assertIsNotNone(value["accounting"]["started_at"])
+            self.assertIsNone(value["accounting"]["runtime"])
+            self.assertIsNone(value["accounting"]["lead_session_id"])
+            self.assertIsNone(value["accounting"]["started_at"])
+            self.assertEqual([], value["accounting"]["participants"])
 
     def test_codex_nonterminal_agent_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
