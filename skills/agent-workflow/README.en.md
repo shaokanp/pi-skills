@@ -241,10 +241,12 @@ they do not spawn agents.
   render, validate, and exact-accounting housekeeping into typed receipts. It
   does not spawn, join, queue, or rotate native agents and does not claim host
   atomicity.
-- **Codex model routing v2**: Sol handles planning, judgment, review, challenge,
-  verification, and high-risk work; Terra handles bounded execution. The user's
-  session reasoning effort is inherited across the workflow, and the router
-  never changes effort per lane.
+- **Codex model routing v2 (native default)**: new Codex native workflows enable
+  routing automatically. Sol handles planning, judgment, review, challenge,
+  verification, and high-risk work; Terra handles bounded execution. Missing
+  trusted host capabilities or session reasoning effort fails closed; `off` is
+  only an explicit rollback. The user's session reasoning effort is inherited
+  across the workflow, and the router never changes effort per lane.
 - **Exact token accounting**: computes Lead and registered-attempt usage from
   native runtime session events and stores Lead-recorded provenance bound to the
   event evidence. Missing evidence fails closed instead of being replaced by an

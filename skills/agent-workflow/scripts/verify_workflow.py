@@ -3054,8 +3054,11 @@ def validate_model_routing(
         failures.append("orchestration.model_routing missing keys: " + ", ".join(missing))
     if unknown:
         failures.append("orchestration.model_routing unknown keys: " + ", ".join(unknown))
-    if block.get("activation") != "explicit_opt_in":
-        failures.append("orchestration.model_routing.activation must be explicit_opt_in")
+    if block.get("activation") not in {"native_default", "explicit_opt_in"}:
+        failures.append(
+            "orchestration.model_routing.activation must be native_default or "
+            "explicit_opt_in"
+        )
     if block.get("adapter") != "codex_builtin_subagents":
         failures.append("orchestration.model_routing.adapter must be codex_builtin_subagents")
     orchestrator = orchestration.get("orchestrator")

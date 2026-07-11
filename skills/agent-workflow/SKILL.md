@@ -29,7 +29,8 @@ This skill does not rely on shelling out from one agent runtime to another. The 
 ## Default Clean Orchestrator Runtime
 
 New Codex native workspaces activate the Clean Orchestrator contract by
-default; this is not a model-routing or token-optimization opt-in. Main passes a
+default. Clean orchestration and model routing remain separate contracts, but
+both now activate by default for new Codex native workspaces. Main passes a
 compact, digest-bound packet to one isolated Orchestrator. Nested lanes also use
 isolated, digest-bound context and return compact receipts. Legacy Main-led
 fan-out and wrapper polling are forbidden production fallbacks when this
@@ -99,9 +100,9 @@ deterministic-result, or sibling-terminal wakes. Bounded interim records every
 native sibling-terminal and deterministic-result reactivation separately and
 cannot present those exceptions as target behavior.
 
-### Opt-In Codex Model Routing
+### Default Codex Model Routing
 
-Enable only with `--model-routing codex --runtime-capabilities <path> --reasoning-effort <value>` and `codex_builtin_subagents`; other runners remain unchanged. Read the current effort from a runtime-provided setting when available, otherwise use the user's explicit statement; if neither exists, ask once instead of inferring it from the model or task. The effort is the user's session-wide choice, is locked once per workflow, and must be inherited unchanged by every routed lane. The router chooses only the model: Sol for planning, judgment, ambiguity, cross-boundary or high-risk work; Terra for bounded execution and repair packets. Read `Opt-In Model Routing Artifacts` in `references/workflow-artifacts.md` before planning. Planned decisions become immutable after attempts start, and required verifiers must satisfy claim-derived model, evidence, and identity gates.
+New `codex_builtin_subagents` workflows enable responsibility-based model routing automatically. Supply `--runtime-capabilities <path>` and `--reasoning-effort <value>` from current host/session evidence; if either is unavailable, fail closed before scaffold or ask once for the session effort instead of silently disabling routing or inferring it from the model or task. Use `--model-routing off` only as an explicit compatibility rollback. Other runners remain unchanged. The effort is the user's session-wide choice, is locked once per workflow, and must be inherited unchanged by every routed lane. The router chooses only the model: Sol for planning, judgment, ambiguity, cross-boundary or high-risk work; Terra for bounded execution and repair packets. Read `Default Model Routing Artifacts` in `references/workflow-artifacts.md` before planning. Planned decisions become immutable after attempts start, and required verifiers must satisfy claim-derived model, evidence, and identity gates.
 Availability, identities, attempts, and actual routes are lead-recorded evidence in v1, not runtime attestation. Do not dispatch until `verify_workflow.py --mode planned` passes.
 
 ### Swarm Card Display

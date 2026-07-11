@@ -156,17 +156,17 @@ v1, scaffold/planned/executed validators, digest and receipt tampering, 30-secon
 polling, timeout, heartbeat cards, deterministic lane admission, budget
 exhaustion, repair affinity, and verifier independence without invoking an LLM.
 
-## Opt-In Codex Model Routing
+## Default Codex Model Routing
 
 Prompt:
 
 ```text
-Use an agent team workflow and explicitly route Codex subagents with the portable responsibility-routing policy.
+Use an agent team workflow and route Codex subagents with the portable responsibility-routing policy.
 ```
 
 Expected behavior:
 
-- Enable routing only with `--model-routing codex`, `--runner-mode codex_builtin_subagents`, a lead-provided `--runtime-capabilities` JSON inventory, explicit `--reasoning-effort`, and fresh `--runner-capability-evidence`. The inventory file alone does not certify availability. Default scaffolds contain no routing block or routing files.
+- New `codex_builtin_subagents` scaffolds enable routing automatically when given a lead-provided `--runtime-capabilities` JSON inventory, explicit `--reasoning-effort`, and fresh `--runner-capability-evidence`. The inventory file alone does not certify availability. Missing required evidence fails closed instead of silently disabling routing; `--model-routing off` is the explicit compatibility rollback.
 - Persist `routing-policy.json` and `runtime-capabilities.json` with canonical digests, and copy both snapshot IDs/digests into every planned lane decision.
 - Classify all packet facts, compute the ordered first-match decision, bind every required verifier and author lane, confirm planned verifier routes meet their floors, replace `draft`, and pass `--mode planned` before dispatch.
 - Snapshot one user-session reasoning effort and require every selected, dispatched, and actual route to preserve it. The router never chooses effort.

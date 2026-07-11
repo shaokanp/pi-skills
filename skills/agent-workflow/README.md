@@ -228,9 +228,11 @@ Codex 不會用 CLI 喚起 Claude Code，Claude Code 也不會用 CLI 喚起 Cod
 - **Portable controller**：`workflow_controller.py` 將 prepare、collect、render、
   validate 與 exact-accounting housekeeping 收進 typed compound receipts，但不 spawn、
   join、queue 或 rotate native agents，也不冒充 host atomicity。
-- **Codex model routing v2**：Sol 負責 planning、judgment、review、challenge、verify
-  與高風險工作；Terra 負責 bounded execution。Reasoning effort 由使用者 session
-  選定後整個 workflow 繼承，router 不會替每個 lane 任意切換 effort。
+- **Codex model routing v2（native 預設）**：新 Codex native workflow 自動啟用；
+  Sol 負責 planning、judgment、review、challenge、verify 與高風險工作，Terra
+  負責 bounded execution。缺少可信 host capabilities 或 session reasoning effort
+  時 fail closed；`off` 只供明確 rollback。Reasoning effort 由使用者 session 選定後
+  整個 workflow 繼承，router 不會替每個 lane 任意切換 effort。
 - **Exact token accounting**：從 native runtime session events 計算 Lead 與所有
   registered attempts，並保存綁定 event evidence 的 Lead-recorded provenance；無法取得
   完整 evidence 時 fail closed，不用估算值冒充 exact。

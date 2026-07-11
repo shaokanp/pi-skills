@@ -470,9 +470,10 @@ For `custom`, the lane object must define:
 
 New `codex_builtin_subagents` workspaces with native execution efficiency add an
 orthogonal `clean_orchestrator_runtime` block. Its activation is
-`native_default`; model routing remains separately opt-in. Existing workspaces,
-manual simulation, Claude Code, and explicit execution-efficiency rollback keep
-their prior compatibility paths.
+`native_default`; model routing is a separate contract that also defaults on for
+new Codex native scaffolds. Existing workspaces, manual simulation, Claude Code,
+and explicit execution-efficiency or model-routing rollback keep their prior
+compatibility paths.
 
 The default topology is:
 
@@ -1003,17 +1004,16 @@ when an explicit compatibility rollback to prior v1 behavior is required. No
 artifact migration is required, and existing `explicit_opt_in` policies remain
 valid for already-created workspaces.
 
-## Opt-In Model Routing Artifacts
+## Default Model Routing Artifacts
 
-Routing is feature-gated inside the existing workspace. It is enabled only when `orchestration.model_routing.enabled` is exactly `true`, and only for `codex_builtin_subagents`. Missing or disabled routing preserves ordinary workspaces, manual simulation, Claude Code runners, and runner records without attempts. Responsibility routing uses policy, capability, and decision schema v2.
+Routing is enabled by default for new `codex_builtin_subagents` scaffolds and remains inactive for manual simulation and Claude Code runners. Inside a workspace it is active only when `orchestration.model_routing.enabled` is exactly `true`; missing or disabled routing remains valid for existing workspaces and explicit `--model-routing off` compatibility rollbacks. Responsibility routing uses policy, capability, and decision schema v2.
 Already-dispatched v1 routed workspaces are never reinterpreted as v2. Resume them with their pinned skill snapshot or create a new v2 round plan before dispatching new attempts. A v1 capability inventory may be supplied to the new scaffold; its obsolete `automatic_efforts` fields are discarded because effort now comes from the user session.
 
-Scaffold with explicit capability input:
+Scaffold with the required host capability and session-effort inputs; no routing enable flag is needed:
 
 ```bash
 python3 scripts/new_workflow.py "Routed workflow" \
   --runner-mode codex_builtin_subagents \
-  --model-routing codex \
   --runtime-capabilities /path/to/capabilities.json \
   --reasoning-effort xhigh \
   --lanes discover,implement,verify
@@ -1024,7 +1024,7 @@ The scaffold writes `routing-policy.json` and `runtime-capabilities.json`, then 
 ```json
 {
   "enabled": true,
-  "activation": "explicit_opt_in",
+  "activation": "native_default",
   "adapter": "codex_builtin_subagents",
   "policy_snapshot": {
     "path": "routing-policy.json",

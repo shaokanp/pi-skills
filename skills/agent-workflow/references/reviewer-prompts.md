@@ -74,7 +74,7 @@ wrapper: run a script and persist its command/result evidence instead.
 
 ## Routed Lane Context
 
-Model routing is explicit opt-in for `codex_builtin_subagents`; it is not inferred for ordinary, legacy, manual, or Claude Code workflows. For an enabled routed workflow, the lead must record a fresh capability recheck bound to the inventory snapshot, replace every scaffold `draft` with a complete planned decision, bind required verifier and author lanes, and pass `verify_workflow.py --mode planned` before dispatch.
+Model routing defaults on for new `codex_builtin_subagents` workflows; legacy workspaces, manual simulation, Claude Code, and explicit rollback remain unrouted. For an enabled routed workflow, the lead must record a fresh capability recheck bound to the inventory snapshot, replace every scaffold `draft` with a complete planned decision, bind required verifier and author lanes, and pass `verify_workflow.py --mode planned` before dispatch.
 
 Pass routed lanes this compact context when it affects their work:
 

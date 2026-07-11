@@ -3,13 +3,16 @@
 ## Unreleased
 
 <!-- pi-skills:unreleased id=explain version=1.0.1 -->
-<!-- pi-skills:unreleased id=agent-workflow version=0.3.2 -->
+<!-- pi-skills:unreleased id=agent-workflow version=0.3.3 -->
 <!-- pi-skills:unreleased id=write-good-goal version=1.0.1 -->
 
 - Added a portable/strict-local session doctor, fail-closed new-skill scaffold,
   bilingual guide checks, and deterministic registry/changelog version markers.
 - Kept Gitleaks in the public publish gate and ignored runtime cache noise when
   checking source-to-production parity.
+- Enabled responsibility-based model routing by default for new Codex native
+  workflows, retained `off` only as an explicit compatibility rollback, and
+  fail closed when current host capabilities or session effort are unavailable.
 - Fixed the execution-efficiency activation bug: new Codex and Claude Code
   native workflows now use isolated context, notification-first waits, compact
   receipts, and budgets by default instead of requiring an opt-in flag.

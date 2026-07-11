@@ -68,6 +68,8 @@ class ExecutionEfficiencyTests(unittest.TestCase):
             slug,
             "--runner-mode",
             runner_mode,
+            "--model-routing",
+            "off",
             "--lanes",
             lanes,
         ]

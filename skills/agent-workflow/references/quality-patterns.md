@@ -90,7 +90,7 @@ Rounds are barriers: every enabled lane completes before integration. Keep the b
 
 ## Claude Code Lane Cost Routing
 
-Codex model routing has an explicit opt-in contract. For `claude_code_builtin_subagents`, apply the same philosophy as lightweight guidance:
+Codex model routing defaults on for new native Codex workflows. For `claude_code_builtin_subagents`, apply the same philosophy as lightweight guidance:
 
 - Default: omit model and effort overrides; lanes inherit the session model.
 - Mechanical, low-ambiguity lanes (formatting checks, inventory sweeps, receipt summarization that somehow needs an LLM) may run on a cheaper model or lower effort; say so in the lane's `runner` notes.

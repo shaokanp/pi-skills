@@ -619,6 +619,71 @@ class ModelRoutingTests(unittest.TestCase):
                 self.assertFalse(lane["runner"]["fork_context"])
             self.assertVerifierPasses(workflow, "scaffold")
 
+    def test_codex_model_routing_is_native_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capability_input = root / "capabilities.json"
+            capabilities = copy.deepcopy(self.positive["capabilities"])
+            capabilities["observed_at"] = rfc3339(
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            )
+            write_json(capability_input, capabilities)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NEW_WORKFLOW),
+                    "Default routed workflow",
+                    "--root",
+                    str(root),
+                    "--runner-mode",
+                    "codex_builtin_subagents",
+                    "--runner-capability-evidence",
+                    "Test harness observed the native Codex routing surface.",
+                    "--runtime-capabilities",
+                    str(capability_input),
+                    "--reasoning-effort",
+                    "xhigh",
+                    "--lanes",
+                    "implement,verify",
+                    "--swarm-card",
+                    "off",
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertEqual(0, result.returncode, result.stdout)
+            workflow = root / "default-routed-workflow"
+            orchestration = load_json(workflow / "orchestration.json")
+            self.assertTrue(orchestration["model_routing"]["enabled"])
+            self.assertEqual(
+                "native_default", orchestration["model_routing"]["activation"]
+            )
+            self.assertTrue((workflow / "routing-policy.json").is_file())
+            self.assertTrue((workflow / "runtime-capabilities.json").is_file())
+            self.assertVerifierPasses(workflow, "scaffold")
+
+    def test_codex_model_routing_default_fails_closed_without_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NEW_WORKFLOW),
+                    "Missing routing capabilities",
+                    "--root",
+                    temp,
+                    "--runner-mode",
+                    "codex_builtin_subagents",
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("enabled by default", result.stdout)
+
     def test_routed_workspace_scaffold_planned_and_executed_modes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             workflow = self._scaffold(
@@ -1731,6 +1796,8 @@ class ModelRoutingTests(unittest.TestCase):
                     "xhigh",
                 ]
             )
+        else:
+            command.extend(["--model-routing", "off"])
         result = subprocess.run(
             command,
             check=False,

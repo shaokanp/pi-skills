@@ -1158,7 +1158,7 @@ class CleanOrchestratorTests(unittest.TestCase):
             verify_workflow.validate_terminal_commit_manifest(workflow, failures, "final")
             self.assertTrue(any("mixed revision" in item for item in failures))
 
-    def test_new_codex_scaffold_defaults_to_clean_contract_without_routing(self) -> None:
+    def test_new_codex_scaffold_keeps_clean_contract_with_routing_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             result = subprocess.run(
@@ -1170,6 +1170,8 @@ class CleanOrchestratorTests(unittest.TestCase):
                     str(root),
                     "--runner-mode",
                     "codex_builtin_subagents",
+                    "--model-routing",
+                    "off",
                     "--runner-capability-evidence",
                     "fixture observed native collaboration",
                     "--lanes",

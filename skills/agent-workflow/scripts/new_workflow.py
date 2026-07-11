@@ -305,11 +305,14 @@ def load_runtime_capability_input(
 
 
 def build_model_routing_block(
-    policy: dict[str, object], capabilities: dict[str, object]
+    policy: dict[str, object],
+    capabilities: dict[str, object],
+    *,
+    activation: str,
 ) -> dict[str, object]:
     return {
         "enabled": True,
-        "activation": "explicit_opt_in",
+        "activation": activation,
         "adapter": "codex_builtin_subagents",
         "policy_snapshot": {
             "path": "routing-policy.json",
@@ -361,11 +364,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--model-routing",
-        choices=("off", "codex"),
-        default="off",
+        choices=("auto", "off", "codex"),
+        default="auto",
         help=(
-            "Explicitly opt in to Codex model routing. Default off preserves "
-            "existing workflow scaffolds."
+            "Control responsibility-based Codex model routing. Default auto "
+            "enables routing for codex_builtin_subagents and leaves other "
+            "runners unchanged; off is an explicit compatibility rollback."
         ),
     )
     parser.add_argument(
@@ -382,8 +386,8 @@ def main() -> int:
     parser.add_argument(
         "--runtime-capabilities",
         help=(
-            "JSON capability inventory to snapshot when --model-routing=codex. "
-            "Required for routed scaffolds."
+            "JSON capability inventory to snapshot when model routing is active. "
+            "Required for Codex native scaffolds unless --model-routing=off."
         ),
     )
     parser.add_argument(
@@ -391,7 +395,7 @@ def main() -> int:
         choices=("low", "medium", "high", "xhigh", "max", "ultra"),
         help=(
             "User-selected session reasoning effort inherited unchanged by every "
-            "routed lane. Required when --model-routing=codex."
+            "routed lane. Required when model routing is active."
         ),
     )
     parser.add_argument(
@@ -451,18 +455,30 @@ def main() -> int:
         execution_policy = build_execution_policy(resolved_runner_mode)
         (round_dir / "receipts").mkdir(parents=True, exist_ok=True)
     routing_context: tuple[dict[str, object], dict[str, object]] | None = None
-    if args.model_routing == "codex":
+    routing_enabled = args.model_routing == "codex" or (
+        args.model_routing == "auto"
+        and resolved_runner_mode == "codex_builtin_subagents"
+    )
+    routing_activation = (
+        "explicit_opt_in" if args.model_routing == "codex" else "native_default"
+    )
+    if args.model_routing == "codex" and resolved_runner_mode != "codex_builtin_subagents":
+        raise SystemExit(
+            "--model-routing=codex requires --runner-mode=codex_builtin_subagents"
+        )
+    if routing_enabled:
         if resolved_runner_mode != "codex_builtin_subagents":
-            raise SystemExit(
-                "--model-routing=codex requires --runner-mode=codex_builtin_subagents"
-            )
+            raise SystemExit("enabled model routing requires codex_builtin_subagents")
         if not args.runtime_capabilities:
             raise SystemExit(
-                "--runtime-capabilities is required when --model-routing=codex"
+                "--runtime-capabilities is required because Codex model routing "
+                "is enabled by default; pass --model-routing=off only for an "
+                "explicit compatibility rollback"
             )
         if not args.reasoning_effort:
             raise SystemExit(
-                "--reasoning-effort is required when --model-routing=codex; "
+                "--reasoning-effort is required because Codex model routing is "
+                "enabled by default; "
                 "the router may not infer or change the user's session effort"
             )
         policy_path = Path(__file__).resolve().parents[1] / "assets" / "model-routing-policy.v2.json"
@@ -590,7 +606,10 @@ def main() -> int:
             resolved_runner_mode
         )
     if routing_context is not None:
-        orchestration["model_routing"] = build_model_routing_block(*routing_context)
+        orchestration["model_routing"] = build_model_routing_block(
+            *routing_context,
+            activation=routing_activation,
+        )
     if execution_policy is not None:
         orchestration["execution_efficiency"] = execution_policy
         orchestration["workflow"]["workspace_root"] = os.path.relpath(
