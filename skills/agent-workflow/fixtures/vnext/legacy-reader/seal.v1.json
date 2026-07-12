@@ -1,0 +1,13 @@
+{
+  "schema_version": "agent-workflow.legacy-reader-fixture-seal.v1",
+  "fixtures": {
+    "v1": {
+      "orchestration.json": "sha256:c57b0eb8d40f651e2799d33064936cb1e6b6f64162e200374dcdd45ffca4ec96",
+      "workflow-state.json": "sha256:9d9842caf3107f0ceb00a22199c487009fcfa189640f9f57bd13687bb96a7945"
+    },
+    "v2": {
+      "orchestration.json": "sha256:876dbaad978a47c92b207161c3d6bc6619db884b3feb20b83b94d148f23b2661",
+      "workflow-state.json": "sha256:97a6f541b359e5603ac3885afc7329a65ec3e1f7cfafa136048c873a92339a4c"
+    }
+  }
+}

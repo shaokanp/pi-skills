@@ -4,6 +4,13 @@
     "dispatch_surface": "multi_agent_v1",
     "observed_at": "2026-07-10T00:00:00Z",
     "source": "fixture_lead_recorded_tool_schema",
+    "dispatch_control": {
+      "model_selectable": true,
+      "effort_selectable": true,
+      "model_parameter": "model",
+      "effort_parameter": "thinking",
+      "source": "host_tool_schema"
+    },
     "reasoning_effort": {
       "source": "user_session",
       "value": "xhigh",

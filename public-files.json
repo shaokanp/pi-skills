@@ -10,6 +10,8 @@
     "CONTRIBUTING.md",
     "LICENSE",
     "README.md",
+    "docs/agent-workflow-vnext-implementation-plan.md",
+    "docs/agent-workflow-vnext-spec.md",
     "docs/release.md",
     "public-files.json",
     "registry.json",

@@ -28,6 +28,7 @@ from execution_efficiency import (
     validate_wait_telemetry,
 )
 from model_routing import (
+    CAPABILITY_SCHEMA,
     RoutingError,
     expected_swarm_projection,
     route_rank,
@@ -2269,9 +2270,12 @@ def validate_orchestration(
     )
     if not isinstance(orchestration, dict):
         return None
-    if orchestration.get("schema_version") != "agent-loops.orchestration.v1":
+    if orchestration.get("schema_version") not in {
+        "agent-loops.orchestration.v1",
+        "agent-loops.orchestration.v2",
+    }:
         failures.append(
-            f"{orchestration_path}.schema_version must be agent-loops.orchestration.v1"
+            f"{orchestration_path}.schema_version must be agent-loops.orchestration.v1 or v2"
         )
 
     workflow = orchestration.get("workflow")
@@ -3029,16 +3033,46 @@ def validate_model_routing(
     if not isinstance(orchestration, dict):
         return None
     block = orchestration.get("model_routing")
+    orchestrator = orchestration.get("orchestrator")
+    runner_mode = orchestrator.get("runner_mode") if isinstance(orchestrator, dict) else None
+    requirement = orchestration.get("model_routing_requirement")
+    mandatory_requirement = {
+        "mode": "mandatory_native",
+        "fallback": "fail_closed",
+        "effort_source": "runtime_turn_context",
+        "actual_dispatch_evidence": "child_runtime_attested",
+    }
+    mandatory = (
+        orchestration.get("schema_version") == "agent-loops.orchestration.v2"
+        and runner_mode == "codex_builtin_subagents"
+    )
+    if mandatory and requirement != mandatory_requirement:
+        failures.append(
+            "orchestration.model_routing_requirement must be the exact mandatory-native contract"
+        )
+    if requirement is not None and runner_mode != "codex_builtin_subagents":
+        failures.append(
+            "orchestration.model_routing_requirement requires codex_builtin_subagents"
+        )
     if block is None:
+        if mandatory:
+            failures.append(
+                "orchestration.model_routing is mandatory for new Codex native workflows"
+            )
         return None
     if not isinstance(block, dict):
         failures.append("orchestration.model_routing must be an object")
         return None
     if block.get("enabled") is False:
+        if mandatory:
+            failures.append(
+                "orchestration.model_routing cannot be disabled for new Codex native workflows"
+            )
         return None
     if block.get("enabled") is not True:
         failures.append("orchestration.model_routing.enabled must be boolean")
         return None
+    activation = block.get("activation")
     expected_keys = {
         "enabled",
         "activation",
@@ -3048,6 +3082,8 @@ def validate_model_routing(
         "reasoning_effort",
         "dispatch_gate",
     }
+    if mandatory:
+        expected_keys.add("session_profile")
     missing = sorted(expected_keys - set(block))
     unknown = sorted(set(block) - expected_keys)
     if missing:
@@ -3061,8 +3097,6 @@ def validate_model_routing(
         )
     if block.get("adapter") != "codex_builtin_subagents":
         failures.append("orchestration.model_routing.adapter must be codex_builtin_subagents")
-    orchestrator = orchestration.get("orchestrator")
-    runner_mode = orchestrator.get("runner_mode") if isinstance(orchestrator, dict) else None
     if runner_mode != "codex_builtin_subagents":
         failures.append("enabled model routing requires codex_builtin_subagents")
     dispatch_gate = block.get("dispatch_gate")
@@ -3103,6 +3137,44 @@ def validate_model_routing(
     capabilities = snapshots.get("capability_snapshot")
     if not isinstance(policy, dict) or not isinstance(capabilities, dict):
         return None
+    if mandatory and capabilities.get("schema_version") != CAPABILITY_SCHEMA:
+        failures.append(
+            "native-default model routing requires runtime-capabilities.v3 with "
+            "model-selectable spawn evidence"
+        )
+    if mandatory:
+        profile = block.get("session_profile")
+        expected_profile_keys = {
+            "schema_version",
+            "runtime",
+            "session_id",
+            "model",
+            "reasoning_effort",
+            "source",
+            "event_line",
+            "event_sha256",
+            "prefix_sha256",
+            "observed_at",
+        }
+        if not isinstance(profile, dict) or set(profile) != expected_profile_keys:
+            failures.append(
+                "orchestration.model_routing.session_profile must contain the exact "
+                "runtime turn-context binding"
+            )
+        else:
+            if profile.get("schema_version") != "agent-workflow.routing-session-profile.v1":
+                failures.append(
+                    "orchestration.model_routing.session_profile schema is invalid"
+                )
+            if profile.get("runtime") != "codex" or profile.get("source") != "runtime_turn_context":
+                failures.append(
+                    "orchestration.model_routing.session_profile must come from Codex turn_context"
+                )
+            effort = capabilities.get("reasoning_effort", {}).get("value")
+            if profile.get("reasoning_effort") != effort:
+                failures.append(
+                    "orchestration.model_routing.session_profile effort must match capabilities"
+                )
     if block.get("reasoning_effort") != capabilities.get("reasoning_effort"):
         failures.append(
             "orchestration.model_routing.reasoning_effort must match the locked "
@@ -4228,6 +4300,18 @@ def validate_v1(workflow_dir: Path, mode: str, require_lane_runs: bool) -> list[
                 )
             except RuntimeHarnessError as exc:
                 failures.append(f"clean orchestrator raw runtime observations: {exc}")
+    mandatory_routing_runtime = (
+        isinstance(orchestration, dict)
+        and orchestration.get("schema_version") == "agent-loops.orchestration.v2"
+        and isinstance(orchestration.get("orchestrator"), dict)
+        and orchestration["orchestrator"].get("runner_mode")
+        == "codex_builtin_subagents"
+    )
+    if mandatory_routing_runtime and mode == "final" and clean_runtime is None:
+        try:
+            validate_runtime_observations(workflow_dir, final=True)
+        except RuntimeHarnessError as exc:
+            failures.append(f"mandatory routing child-runtime observations: {exc}")
     validate_token_participant_coverage(token_usage, lifecycle_evidence, mode, failures)
     validate_execution_efficiency_runtime(
         workflow_dir,

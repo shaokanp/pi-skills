@@ -1,0 +1,15 @@
+{
+  "schema_version": "agent-workflow.workflow-brief.vnext.v1",
+  "objective": "This fixture must be rejected.",
+  "success_criteria": [],
+  "constraints": [],
+  "authority": {
+    "revision": 1,
+    "external_actions": "host_approval_required"
+  },
+  "relevant_roots": [],
+  "evidence_refs": [],
+  "exclusions": [],
+  "deliverable": "Nothing.",
+  "main_transcript": "A transcript must never enter the clean brief."
+}

@@ -1,0 +1,58 @@
+{
+  "schema_version": "agent-workflow.canary-corpus.v1",
+  "corpus_id": "agent-workflow-vnext-promotion-v1",
+  "paired_trials_per_workload": 5,
+  "pairing_policy": "same_repo_host_models_reasoning_capacity_randomized_order",
+  "workloads": [
+    {
+      "id": "read-research-v1",
+      "workload_class": "read_research",
+      "coordination_heavy": true,
+      "minimum_worker_sessions": 2,
+      "objective": "Research two independent evidence questions and reduce them into one verified answer.",
+      "fixture_profile": "generated_read_only_repository_v1",
+      "success_criteria": ["Both questions are answered with evidence.", "No product files change."],
+      "hard_check_ids": ["AW-H001", "AW-H002", "AW-H003", "AW-H004", "AW-H010", "AW-H011"]
+    },
+    {
+      "id": "disjoint-writers-v1",
+      "workload_class": "disjoint_multi_writer",
+      "coordination_heavy": true,
+      "minimum_worker_sessions": 2,
+      "objective": "Implement two independent changes with mechanically disjoint write roots and integrate them exactly once.",
+      "fixture_profile": "generated_disjoint_writer_repository_v1",
+      "success_criteria": ["Both changes pass focused tests.", "Only declared roots change."],
+      "hard_check_ids": ["AW-H001", "AW-H002", "AW-H005", "AW-H006", "AW-H008", "AW-H010", "AW-H011"]
+    },
+    {
+      "id": "single-integrator-v1",
+      "workload_class": "single_writer_integration",
+      "coordination_heavy": true,
+      "minimum_worker_sessions": 2,
+      "objective": "Resolve overlapping implementation work through one routed integrator and independent verification.",
+      "fixture_profile": "generated_single_integrator_repository_v1",
+      "success_criteria": ["No parallel overlap occurs.", "The integrated behavior passes its acceptance tests."],
+      "hard_check_ids": ["AW-H001", "AW-H005", "AW-H006", "AW-H008", "AW-H010", "AW-H011"]
+    },
+    {
+      "id": "bounded-recovery-v1",
+      "workload_class": "failure_recovery",
+      "coordination_heavy": true,
+      "minimum_worker_sessions": 3,
+      "objective": "Preserve successful siblings while one failed lineage receives at most one evidence-aware recovery.",
+      "fixture_profile": "generated_recovery_repository_v1",
+      "success_criteria": ["Successful work is not rerun.", "The failed lineage cannot obtain a second autonomous recovery."],
+      "hard_check_ids": ["AW-H001", "AW-H004", "AW-H007", "AW-H009", "AW-H010", "AW-H011"]
+    },
+    {
+      "id": "long-verification-v1",
+      "workload_class": "long_verification",
+      "coordination_heavy": true,
+      "minimum_worker_sessions": 1,
+      "objective": "Run a long bounded verification phase without progress wakes and terminate every owned process.",
+      "fixture_profile": "generated_long_verification_repository_v1",
+      "success_criteria": ["Verification remains bounded.", "Only the terminal receipt wakes the Orchestrator."],
+      "hard_check_ids": ["AW-H001", "AW-H002", "AW-H003", "AW-H008", "AW-H009", "AW-H010", "AW-H011"]
+    }
+  ]
+}

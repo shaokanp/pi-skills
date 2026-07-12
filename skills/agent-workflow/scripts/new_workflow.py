@@ -25,6 +25,7 @@ from model_routing import (
     prepare_capability_snapshot,
 )
 from render_swarm_card import build_initial_card
+from routing_runtime import RoutingRuntimeError, resolve_reasoning_effort
 from runtime_harness import HARNESS_SCHEMA
 from token_accounting import (
     TOKEN_USAGE_SCHEMA,
@@ -369,7 +370,7 @@ def main() -> int:
         help=(
             "Control responsibility-based Codex model routing. Default auto "
             "enables routing for codex_builtin_subagents and leaves other "
-            "runners unchanged; off is an explicit compatibility rollback."
+            "runners unchanged. New Codex native workflows cannot disable routing."
         ),
     )
     parser.add_argument(
@@ -380,22 +381,30 @@ def main() -> int:
             "Control isolated native dispatch, notification-first waits, compact "
             "receipts, admission gates, and execution budgets. Default auto enables "
             "the policy for native Codex and Claude Code runners and leaves manual "
-            "simulation unchanged; off is an explicit compatibility rollback."
+            "simulation unchanged; off is a non-Codex compatibility rollback."
         ),
     )
     parser.add_argument(
         "--runtime-capabilities",
         help=(
             "JSON capability inventory to snapshot when model routing is active. "
-            "Required for Codex native scaffolds unless --model-routing=off."
+            "New Codex native scaffolds require host-tool-schema evidence that "
+            "model and thinking are selectable on the native spawn surface."
+        ),
+    )
+    parser.add_argument(
+        "--runtime-session-log",
+        help=(
+            "Optional Codex JSONL session log used to resolve the current model "
+            "and reasoning effort. By default CODEX_THREAD_ID and CODEX_HOME are used."
         ),
     )
     parser.add_argument(
         "--reasoning-effort",
         choices=("low", "medium", "high", "xhigh", "max", "ultra"),
         help=(
-            "User-selected session reasoning effort inherited unchanged by every "
-            "routed lane. Required when model routing is active."
+            "Optional assertion for the current session reasoning effort. The value "
+            "is inherited from runtime turn_context and cannot override it."
         ),
     )
     parser.add_argument(
@@ -435,14 +444,20 @@ def main() -> int:
             f"Workflow already exists: {run_dir}. Use --reuse-existing to keep "
             "existing files, or choose a new --slug."
         )
-    round_id = "round-001"
-    round_dir = run_dir / "rounds" / round_id
-    lane_runs_dir = round_dir / "lane-runs"
-    lane_runs_dir.mkdir(parents=True, exist_ok=True)
-
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    round_id = "round-001"
     lanes = parse_lanes(args.lanes)
     resolved_runner_mode = resolve_runner_mode(args.runner_mode)
+    if resolved_runner_mode == "codex_builtin_subagents" and args.model_routing == "off":
+        raise SystemExit("--model-routing=off is unsupported for new Codex native workflows")
+    if (
+        resolved_runner_mode == "codex_builtin_subagents"
+        and args.execution_efficiency == "off"
+    ):
+        raise SystemExit(
+            "--execution-efficiency=off is incompatible with mandatory Codex routing "
+            "because final child-runtime attestation is required"
+        )
     execution_policy: dict[str, object] | None = None
     if (
         args.execution_efficiency == "native"
@@ -453,15 +468,9 @@ def main() -> int:
         )
     if resolved_runner_mode != "manual_simulation" and args.execution_efficiency != "off":
         execution_policy = build_execution_policy(resolved_runner_mode)
-        (round_dir / "receipts").mkdir(parents=True, exist_ok=True)
     routing_context: tuple[dict[str, object], dict[str, object]] | None = None
-    routing_enabled = args.model_routing == "codex" or (
-        args.model_routing == "auto"
-        and resolved_runner_mode == "codex_builtin_subagents"
-    )
-    routing_activation = (
-        "explicit_opt_in" if args.model_routing == "codex" else "native_default"
-    )
+    routing_enabled = resolved_runner_mode == "codex_builtin_subagents"
+    routing_activation = "native_default"
     if args.model_routing == "codex" and resolved_runner_mode != "codex_builtin_subagents":
         raise SystemExit(
             "--model-routing=codex requires --runner-mode=codex_builtin_subagents"
@@ -472,15 +481,15 @@ def main() -> int:
         if not args.runtime_capabilities:
             raise SystemExit(
                 "--runtime-capabilities is required because Codex model routing "
-                "is enabled by default; pass --model-routing=off only for an "
-                "explicit compatibility rollback"
+                "is mandatory; silent or explicit routing disable is unsupported"
             )
-        if not args.reasoning_effort:
-            raise SystemExit(
-                "--reasoning-effort is required because Codex model routing is "
-                "enabled by default; "
-                "the router may not infer or change the user's session effort"
+        try:
+            reasoning_effort, session_profile = resolve_reasoning_effort(
+                args.reasoning_effort,
+                session_log=args.runtime_session_log,
             )
+        except RoutingRuntimeError as exc:
+            raise SystemExit(f"Cannot inherit current Codex reasoning effort: {exc}") from exc
         policy_path = Path(__file__).resolve().parents[1] / "assets" / "model-routing-policy.v2.json"
         try:
             policy = load_policy_template(policy_path)
@@ -488,9 +497,11 @@ def main() -> int:
             raise SystemExit(f"Invalid tracked routing policy template: {exc}") from exc
         capabilities = load_runtime_capability_input(
             args.runtime_capabilities,
-            reasoning_effort=args.reasoning_effort,
+            reasoning_effort=reasoning_effort,
         )
         routing_context = (policy, capabilities)
+    else:
+        session_profile = None
     capability_evidence = args.runner_capability_evidence
     adapter = runner_adapter(
         resolved_runner_mode,
@@ -512,6 +523,12 @@ def main() -> int:
         execution_policy,
         round_id,
     )
+
+    round_dir = run_dir / "rounds" / round_id
+    lane_runs_dir = round_dir / "lane-runs"
+    lane_runs_dir.mkdir(parents=True, exist_ok=True)
+    if execution_policy is not None:
+        (round_dir / "receipts").mkdir(parents=True, exist_ok=True)
 
     state = {
         "schema_version": "agent-workflow.workflow.v2",
@@ -565,7 +582,7 @@ def main() -> int:
         runtime_round["lanes"] = lane_specs
         initial_round = runtime_round
     orchestration = {
-        "schema_version": "agent-loops.orchestration.v1",
+        "schema_version": "agent-loops.orchestration.v2",
         "workflow": {
             "title": args.title,
             "slug": slug,
@@ -606,10 +623,28 @@ def main() -> int:
             resolved_runner_mode
         )
     if routing_context is not None:
+        orchestration["model_routing_requirement"] = {
+            "mode": "mandatory_native",
+            "fallback": "fail_closed",
+            "effort_source": "runtime_turn_context",
+            "actual_dispatch_evidence": "child_runtime_attested",
+        }
         orchestration["model_routing"] = build_model_routing_block(
             *routing_context,
             activation=routing_activation,
         )
+        orchestration["model_routing"]["session_profile"] = {
+            "schema_version": session_profile["schema_version"],
+            "runtime": session_profile["runtime"],
+            "session_id": session_profile["session_id"],
+            "model": session_profile["model"],
+            "reasoning_effort": session_profile["reasoning_effort"],
+            "source": session_profile["source"],
+            "event_line": session_profile["event_line"],
+            "event_sha256": session_profile["event_sha256"],
+            "prefix_sha256": session_profile["prefix_sha256"],
+            "observed_at": session_profile["observed_at"],
+        }
     if execution_policy is not None:
         orchestration["execution_efficiency"] = execution_policy
         orchestration["workflow"]["workspace_root"] = os.path.relpath(

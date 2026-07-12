@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 from pathlib import Path
 from typing import Any
@@ -1158,9 +1159,45 @@ class CleanOrchestratorTests(unittest.TestCase):
             verify_workflow.validate_terminal_commit_manifest(workflow, failures, "final")
             self.assertTrue(any("mixed revision" in item for item in failures))
 
-    def test_new_codex_scaffold_keeps_clean_contract_with_routing_rollback(self) -> None:
+    def test_new_codex_scaffold_keeps_clean_contract_with_mandatory_routing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            capabilities = json.loads(
+                (
+                    SCRIPT_DIR.parent
+                    / "fixtures"
+                    / "model-routing"
+                    / "positive.json"
+                ).read_text(encoding="utf-8")
+            )["capabilities"]
+            capabilities["observed_at"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            capability_path = root / "capabilities.json"
+            capability_path.write_text(
+                json.dumps(capabilities, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            session_path = (
+                root / "codex-home" / "sessions" / "rollout-fixture-session.jsonl"
+            )
+            session_path.parent.mkdir(parents=True)
+            session_id = "fixture-session"
+            session_path.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {"type": "session_meta", "payload": {"id": session_id}},
+                        {
+                            "timestamp": "2026-07-11T00:00:00Z",
+                            "type": "turn_context",
+                            "payload": {"model": "gpt-5.6-sol", "effort": "xhigh"},
+                        },
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             result = subprocess.run(
                 [
                     sys.executable,
@@ -1170,8 +1207,10 @@ class CleanOrchestratorTests(unittest.TestCase):
                     str(root),
                     "--runner-mode",
                     "codex_builtin_subagents",
-                    "--model-routing",
-                    "off",
+                    "--runtime-capabilities",
+                    str(capability_path),
+                    "--runtime-session-log",
+                    str(session_path),
                     "--runner-capability-evidence",
                     "fixture observed native collaboration",
                     "--lanes",
@@ -1181,6 +1220,11 @@ class CleanOrchestratorTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 check=False,
+                env={
+                    **os.environ,
+                    "CODEX_THREAD_ID": session_id,
+                    "CODEX_HOME": str(session_path.parent.parent),
+                },
             )
             self.assertEqual(0, result.returncode, result.stdout)
             workflow = root / "clean-default"
@@ -1188,7 +1232,11 @@ class CleanOrchestratorTests(unittest.TestCase):
                 (workflow / "orchestration.json").read_text(encoding="utf-8")
             )
             self.assertIn("clean_orchestrator_runtime", orchestration)
-            self.assertNotIn("model_routing", orchestration)
+            self.assertIn("model_routing", orchestration)
+            self.assertEqual(
+                "mandatory_native",
+                orchestration["model_routing_requirement"]["mode"],
+            )
             self.assertEqual(
                 "capability_required",
                 orchestration["clean_orchestrator_runtime"]["delivery_level"],

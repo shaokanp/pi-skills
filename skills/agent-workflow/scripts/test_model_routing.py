@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +34,17 @@ AUTOMATIC_REQUEST = {
     "reason": "",
     "evidence_refs": [],
 }
+TEST_SESSION_ID = "fixture-session"
+
+
+def codex_test_env(session_log: Path | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env["CODEX_THREAD_ID"] = TEST_SESSION_ID
+    if session_log is not None:
+        if session_log.parent.name != "sessions":
+            raise AssertionError("Codex fixture logs must live below CODEX_HOME/sessions")
+        env["CODEX_HOME"] = str(session_log.parent.parent)
+    return env
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -68,6 +80,26 @@ def route_text(value: dict[str, str] | None) -> str | None:
 def rfc3339(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
         "+00:00", "Z"
+    )
+
+
+def write_codex_session(path: Path, *, effort: str = "xhigh") -> None:
+    timestamp = "2026-07-11T00:00:00+00:00"
+    append_jsonl(
+        path,
+        {
+            "timestamp": timestamp,
+            "type": "session_meta",
+            "payload": {"id": TEST_SESSION_ID},
+        },
+    )
+    append_jsonl(
+        path,
+        {
+            "timestamp": timestamp,
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.6-sol", "effort": effort},
+        },
     )
 
 
@@ -113,6 +145,24 @@ class ModelRoutingTests(unittest.TestCase):
                 self.assertEqual(case["expected_status"], validated["status"])
                 self.assertEqual(case["expected_route"], route_text(validated["selected"]))
                 self.assertEqual(case["expected_rule"], validated["matched_rule_id"])
+
+    def test_capability_v3_requires_native_model_and_effort_controls(self) -> None:
+        mutated = copy.deepcopy(self.capabilities)
+        mutated["dispatch_control"]["model_selectable"] = False
+        refresh_content_digest(mutated)
+        with self.assertRaisesRegex(
+            model_routing.RoutingError,
+            "model_selectable must be true",
+        ):
+            model_routing.validate_capability_snapshot(mutated)
+
+    def test_legacy_v2_capability_snapshot_remains_readable(self) -> None:
+        legacy = copy.deepcopy(self.capabilities)
+        legacy["schema_version"] = model_routing.LEGACY_CAPABILITY_SCHEMA
+        legacy.pop("dispatch_control")
+        refresh_content_digest(legacy)
+        validated = model_routing.validate_capability_snapshot(legacy)
+        self.assertEqual(model_routing.LEGACY_CAPABILITY_SCHEMA, validated["schema_version"])
 
     def test_tracked_negative_policy_capability_and_fact_fixtures(self) -> None:
         policy_mutators = {
@@ -628,6 +678,8 @@ class ModelRoutingTests(unittest.TestCase):
                 datetime.now(timezone.utc) - timedelta(minutes=1)
             )
             write_json(capability_input, capabilities)
+            session_log = root / "codex-home" / "sessions" / "rollout-fixture-session.jsonl"
+            write_codex_session(session_log)
             result = subprocess.run(
                 [
                     sys.executable,
@@ -641,8 +693,8 @@ class ModelRoutingTests(unittest.TestCase):
                     "Test harness observed the native Codex routing surface.",
                     "--runtime-capabilities",
                     str(capability_input),
-                    "--reasoning-effort",
-                    "xhigh",
+                    "--runtime-session-log",
+                    str(session_log),
                     "--lanes",
                     "implement,verify",
                     "--swarm-card",
@@ -652,6 +704,7 @@ class ModelRoutingTests(unittest.TestCase):
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                env=codex_test_env(session_log),
             )
             self.assertEqual(0, result.returncode, result.stdout)
             workflow = root / "default-routed-workflow"
@@ -659,6 +712,10 @@ class ModelRoutingTests(unittest.TestCase):
             self.assertTrue(orchestration["model_routing"]["enabled"])
             self.assertEqual(
                 "native_default", orchestration["model_routing"]["activation"]
+            )
+            self.assertEqual(
+                "xhigh",
+                orchestration["model_routing"]["session_profile"]["reasoning_effort"],
             )
             self.assertTrue((workflow / "routing-policy.json").is_file())
             self.assertTrue((workflow / "runtime-capabilities.json").is_file())
@@ -680,9 +737,261 @@ class ModelRoutingTests(unittest.TestCase):
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                env=codex_test_env(),
             )
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("enabled by default", result.stdout)
+            self.assertIn("routing is mandatory", result.stdout)
+
+    def test_codex_model_routing_cannot_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NEW_WORKFLOW),
+                    "Disabled routing",
+                    "--root",
+                    str(root),
+                    "--runner-mode",
+                    "codex_builtin_subagents",
+                    "--model-routing",
+                    "off",
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=codex_test_env(),
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("unsupported for new Codex native workflows", result.stdout)
+            self.assertFalse((root / "disabled-routing").exists())
+            manual = subprocess.run(
+                [
+                    sys.executable,
+                    str(NEW_WORKFLOW),
+                    "Manual routing off",
+                    "--root",
+                    str(root),
+                    "--runner-mode",
+                    "manual_simulation",
+                    "--model-routing",
+                    "off",
+                    "--swarm-card",
+                    "off",
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=codex_test_env(),
+            )
+            self.assertEqual(0, manual.returncode, manual.stdout)
+
+    def test_codex_reasoning_effort_assertion_cannot_override_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capability_input = root / "capabilities.json"
+            capabilities = copy.deepcopy(self.positive["capabilities"])
+            capabilities["observed_at"] = rfc3339(
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            )
+            write_json(capability_input, capabilities)
+            session_log = root / "codex-home" / "sessions" / "rollout-fixture-session.jsonl"
+            write_codex_session(session_log, effort="xhigh")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NEW_WORKFLOW),
+                    "Mismatched effort",
+                    "--root",
+                    str(root),
+                    "--runner-mode",
+                    "codex_builtin_subagents",
+                    "--runner-capability-evidence",
+                    "Fixture observed the native surface.",
+                    "--runtime-capabilities",
+                    str(capability_input),
+                    "--runtime-session-log",
+                    str(session_log),
+                    "--reasoning-effort",
+                    "high",
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=codex_test_env(session_log),
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("assertion, not an override", result.stdout)
+            self.assertFalse((root / "mismatched-effort").exists())
+
+    def test_codex_rejects_foreign_runtime_session_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capability_input = root / "capabilities.json"
+            capabilities = copy.deepcopy(self.positive["capabilities"])
+            capabilities["observed_at"] = rfc3339(
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            )
+            write_json(capability_input, capabilities)
+            session_log = root / "codex-home" / "sessions" / "rollout-fixture-session.jsonl"
+            append_jsonl(
+                session_log,
+                {"type": "session_meta", "payload": {"id": "foreign-session"}},
+            )
+            append_jsonl(
+                session_log,
+                {
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol", "effort": "low"},
+                },
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NEW_WORKFLOW),
+                    "Foreign session",
+                    "--root",
+                    str(root),
+                    "--runner-mode",
+                    "codex_builtin_subagents",
+                    "--runner-capability-evidence",
+                    "Fixture observed the native surface.",
+                    "--runtime-capabilities",
+                    str(capability_input),
+                    "--runtime-session-log",
+                    str(session_log),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=codex_test_env(session_log),
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("does not match the current thread", result.stdout)
+            self.assertFalse((root / "foreign-session").is_dir())
+
+    def test_explicit_runtime_log_still_requires_current_thread_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capability_input = root / "capabilities.json"
+            capabilities = copy.deepcopy(self.positive["capabilities"])
+            capabilities["observed_at"] = rfc3339(
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            )
+            write_json(capability_input, capabilities)
+            session_log = root / "codex-home" / "sessions" / "rollout-fixture-session.jsonl"
+            write_codex_session(session_log)
+            env = os.environ.copy()
+            env.pop("CODEX_THREAD_ID", None)
+            env["CODEX_HOME"] = str(session_log.parent.parent)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NEW_WORKFLOW),
+                    "Missing current thread",
+                    "--root",
+                    str(root),
+                    "--runner-mode",
+                    "codex_builtin_subagents",
+                    "--runner-capability-evidence",
+                    "Fixture observed the native surface.",
+                    "--runtime-capabilities",
+                    str(capability_input),
+                    "--runtime-session-log",
+                    str(session_log),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("explicit log cannot replace CODEX_THREAD_ID", result.stdout)
+
+    def test_same_id_forged_log_cannot_replace_canonical_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            capability_input = root / "capabilities.json"
+            capabilities = copy.deepcopy(self.positive["capabilities"])
+            capabilities["observed_at"] = rfc3339(
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            )
+            write_json(capability_input, capabilities)
+            canonical = (
+                root / "codex-home" / "sessions" / "rollout-fixture-session.jsonl"
+            )
+            write_codex_session(canonical, effort="xhigh")
+            forged = root / "forged.jsonl"
+            write_codex_session(forged, effort="low")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(NEW_WORKFLOW),
+                    "Forged current session",
+                    "--root",
+                    str(root),
+                    "--runner-mode",
+                    "codex_builtin_subagents",
+                    "--runner-capability-evidence",
+                    "Fixture observed the native surface.",
+                    "--runtime-capabilities",
+                    str(capability_input),
+                    "--runtime-session-log",
+                    str(forged),
+                ],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=codex_test_env(canonical),
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("must be the canonical current-thread log", result.stdout)
+
+    def test_new_codex_schema_cannot_drop_mandatory_routing_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow = self._scaffold(
+                Path(temp),
+                "mandatory-marker",
+                "codex_builtin_subagents",
+                lanes="verify",
+                routing=True,
+                execution_efficiency=None,
+            )
+            orchestration = load_json(workflow / "orchestration.json")
+            orchestration.pop("model_routing_requirement")
+            orchestration.pop("model_routing")
+            for lane in orchestration["rounds"][0]["lanes"]:
+                lane.pop("routing", None)
+            write_json(workflow / "orchestration.json", orchestration)
+            result = self.verify(workflow, "scaffold")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("mandatory-native contract", result.stdout)
+
+    def test_mandatory_routing_final_cannot_remove_clean_runtime_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow = self._scaffold(
+                Path(temp),
+                "mandatory-runtime",
+                "codex_builtin_subagents",
+                lanes="verify",
+                routing=True,
+                execution_efficiency=None,
+            )
+            orchestration = load_json(workflow / "orchestration.json")
+            orchestration.pop("clean_orchestrator_runtime")
+            write_json(workflow / "orchestration.json", orchestration)
+            state = load_json(workflow / "state.json")
+            state.pop("runtime_contract")
+            write_json(workflow / "state.json", state)
+            result = self.verify(workflow, "final")
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("mandatory routing child-runtime observations", result.stdout)
 
     def test_routed_workspace_scaffold_planned_and_executed_modes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1777,36 +2086,91 @@ class ModelRoutingTests(unittest.TestCase):
             command.extend(
                 ["--runner-capability-evidence", "Test harness observed the native surface."]
             )
-        if execution_efficiency is not None:
+        legacy_codex = (
+            runner_mode == "codex_builtin_subagents"
+            and execution_efficiency == "off"
+        )
+        if execution_efficiency is not None and not legacy_codex:
             command.extend(["--execution-efficiency", execution_efficiency])
-        if routing:
+        if runner_mode == "codex_builtin_subagents":
             capability_input = root / f"{slug}-capabilities.json"
             capabilities = copy.deepcopy(self.positive["capabilities"])
             capabilities["observed_at"] = rfc3339(
                 datetime.now(timezone.utc) - timedelta(minutes=1)
             )
             write_json(capability_input, capabilities)
+            session_log = (
+                root
+                / f"{slug}-codex-home"
+                / "sessions"
+                / "rollout-fixture-session.jsonl"
+            )
+            write_codex_session(session_log)
             command.extend(
                 [
-                    "--model-routing",
-                    "codex",
                     "--runtime-capabilities",
                     str(capability_input),
-                    "--reasoning-effort",
-                    "xhigh",
+                    "--runtime-session-log",
+                    str(session_log),
                 ]
             )
-        else:
-            command.extend(["--model-routing", "off"])
         result = subprocess.run(
             command,
             check=False,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=codex_test_env(session_log if runner_mode == "codex_builtin_subagents" else None),
         )
         self.assertEqual(0, result.returncode, result.stdout)
-        return workflow_root / slug
+        workflow = workflow_root / slug
+        if runner_mode == "codex_builtin_subagents" and not routing:
+            self._make_legacy_unrouted(workflow)
+        elif legacy_codex:
+            self._make_legacy_routed(workflow)
+        return workflow
+
+    @staticmethod
+    def _make_legacy_base(workflow: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+        orchestration = load_json(workflow / "orchestration.json")
+        orchestration["schema_version"] = "agent-loops.orchestration.v1"
+        orchestration.pop("model_routing_requirement", None)
+        orchestration.pop("clean_orchestrator_runtime", None)
+        orchestration.pop("execution_efficiency", None)
+        state = load_json(workflow / "state.json")
+        state.pop("runtime_contract", None)
+        write_json(workflow / "state.json", state)
+        evidence = load_json(workflow / "runner-evidence.json")
+        evidence.pop("execution_efficiency", None)
+        evidence.pop("completion_density", None)
+        return orchestration, evidence
+
+    @classmethod
+    def _make_legacy_routed(cls, workflow: Path) -> None:
+        orchestration, evidence = cls._make_legacy_base(workflow)
+        routing = orchestration.get("model_routing")
+        if isinstance(routing, dict):
+            routing["activation"] = "explicit_opt_in"
+            routing.pop("session_profile", None)
+        write_json(workflow / "orchestration.json", orchestration)
+        write_json(workflow / "runner-evidence.json", evidence)
+
+    @classmethod
+    def _make_legacy_unrouted(cls, workflow: Path) -> None:
+        """Model existing pre-mandatory workspaces without weakening new scaffolds."""
+
+        orchestration, evidence = cls._make_legacy_base(workflow)
+        orchestration.pop("model_routing", None)
+        for round_plan in orchestration.get("rounds", []):
+            for lane in round_plan.get("lanes", []):
+                lane.pop("routing", None)
+        write_json(workflow / "orchestration.json", orchestration)
+        evidence.pop("model_capability_snapshot", None)
+        write_json(workflow / "runner-evidence.json", evidence)
+        for name in ("routing-policy.json", "runtime-capabilities.json"):
+            path = workflow / name
+            if path.exists():
+                path.unlink()
 
     @staticmethod
     def _materialize_strict_contract(workflow: Path) -> None:

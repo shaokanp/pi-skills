@@ -13,7 +13,8 @@ from typing import Any, Iterable
 
 
 POLICY_SCHEMA = "agent-workflow.model-routing-policy.v2"
-CAPABILITY_SCHEMA = "agent-workflow.runtime-capabilities.v2"
+LEGACY_CAPABILITY_SCHEMA = "agent-workflow.runtime-capabilities.v2"
+CAPABILITY_SCHEMA = "agent-workflow.runtime-capabilities.v3"
 PACKET_SCHEMA = "agent-workflow.routing-packet.v1"
 DECISION_SCHEMA = "agent-workflow.routing-decision.v2"
 
@@ -74,7 +75,7 @@ POLICY_KEYS = {
     "fallback_policy",
     "attempt_policy",
 }
-CAPABILITY_KEYS = {
+LEGACY_CAPABILITY_KEYS = {
     "schema_version",
     "snapshot_id",
     "snapshot_version",
@@ -85,6 +86,14 @@ CAPABILITY_KEYS = {
     "reasoning_effort",
     "content_sha256",
     "models",
+}
+CAPABILITY_KEYS = LEGACY_CAPABILITY_KEYS | {"dispatch_control"}
+DISPATCH_CONTROL_KEYS = {
+    "model_selectable",
+    "effort_selectable",
+    "model_parameter",
+    "effort_parameter",
+    "source",
 }
 DECISION_KEYS = {
     "schema_version",
@@ -550,9 +559,44 @@ def prepare_capability_snapshot(
 
 def validate_capability_snapshot(value: Any) -> dict[str, Any]:
     snapshot = _require_object(value, "runtime capabilities")
-    _require_exact_keys(snapshot, CAPABILITY_KEYS, "runtime capabilities")
-    if snapshot.get("schema_version") != CAPABILITY_SCHEMA:
-        raise RoutingError(f"runtime capabilities.schema_version must be {CAPABILITY_SCHEMA}")
+    schema = snapshot.get("schema_version")
+    if schema == LEGACY_CAPABILITY_SCHEMA:
+        _require_exact_keys(snapshot, LEGACY_CAPABILITY_KEYS, "runtime capabilities")
+    elif schema == CAPABILITY_SCHEMA:
+        _require_exact_keys(snapshot, CAPABILITY_KEYS, "runtime capabilities")
+        dispatch = _require_object(
+            snapshot.get("dispatch_control"), "runtime capabilities.dispatch_control"
+        )
+        _require_exact_keys(
+            dispatch,
+            DISPATCH_CONTROL_KEYS,
+            "runtime capabilities.dispatch_control",
+        )
+        if dispatch.get("model_selectable") is not True:
+            raise RoutingError(
+                "runtime capabilities.dispatch_control.model_selectable must be true"
+            )
+        if dispatch.get("effort_selectable") is not True:
+            raise RoutingError(
+                "runtime capabilities.dispatch_control.effort_selectable must be true"
+            )
+        if dispatch.get("model_parameter") != "model":
+            raise RoutingError(
+                "runtime capabilities.dispatch_control.model_parameter must be model"
+            )
+        if dispatch.get("effort_parameter") != "thinking":
+            raise RoutingError(
+                "runtime capabilities.dispatch_control.effort_parameter must be thinking"
+            )
+        if dispatch.get("source") != "host_tool_schema":
+            raise RoutingError(
+                "runtime capabilities.dispatch_control.source must be host_tool_schema"
+            )
+    else:
+        raise RoutingError(
+            "runtime capabilities.schema_version must be "
+            f"{CAPABILITY_SCHEMA} or legacy {LEGACY_CAPABILITY_SCHEMA}"
+        )
     if snapshot.get("adapter") != "codex_builtin_subagents":
         raise RoutingError("runtime capabilities.adapter must be codex_builtin_subagents")
     if snapshot.get("dispatch_surface") != "multi_agent_v1":

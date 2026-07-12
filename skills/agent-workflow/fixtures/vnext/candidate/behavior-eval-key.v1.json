@@ -1,0 +1,9 @@
+{
+  "schema_version": "agent-workflow.candidate-behavior-key.v1",
+  "mapping": {
+    "explicit-multi-phase-source-change": {"candidate": "A", "baseline": "B"},
+    "adversarial-budget-first": {"candidate": "B", "baseline": "A"},
+    "negative-trigger-small-edit": {"candidate": "A", "baseline": "B"},
+    "failed-sibling-recovery": {"candidate": "A", "baseline": "B"}
+  }
+}

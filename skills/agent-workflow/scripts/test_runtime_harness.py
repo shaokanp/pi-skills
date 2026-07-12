@@ -170,6 +170,325 @@ def write_codex_fixture(path: Path, value: dict[str, Any]) -> tuple[str, int]:
 
 
 class RuntimeHarnessScenarioTests(unittest.TestCase):
+    def test_legacy_runtime_observation_v1_remains_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            workflow = Path(temp)
+            session = workflow / "lead.jsonl"
+            session.write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": "legacy-lead"}})
+                + "\n",
+                encoding="utf-8",
+            )
+            ledger: dict[str, Any] = {}
+            (workflow / "runner-evidence.json").write_text(
+                json.dumps({"completion_density": ledger}) + "\n",
+                encoding="utf-8",
+            )
+            (workflow / "orchestration.json").write_text("{}\n", encoding="utf-8")
+            observation = {
+                "schema_version": runtime_harness.LEGACY_OBSERVATION_SCHEMA,
+                "source": "raw_runtime_session_events",
+                "lead_session_id": "legacy-lead",
+                "boundary": {},
+                "completion_projection_sha256": clean_orchestrator.canonical_sha256(ledger),
+                "session_sources": [
+                    {
+                        "session_id": "legacy-lead",
+                        "path": str(session),
+                        "sealed_through_line": 1,
+                        "sealed_prefix_sha256": runtime_harness.prefix_sha256(session, 1),
+                    }
+                ],
+            }
+            (workflow / "runtime-observations.json").write_text(
+                json.dumps(observation) + "\n",
+                encoding="utf-8",
+            )
+            validated = runtime_harness.validate_artifact(workflow, final=False)
+            self.assertEqual(
+                runtime_harness.LEGACY_OBSERVATION_SCHEMA,
+                validated["schema_version"],
+            )
+
+    def test_raw_routed_dispatches_require_model_and_thinking(self) -> None:
+        orchestration = {
+            "model_routing_requirement": {
+                "mode": "mandatory_native",
+                "fallback": "fail_closed",
+                "effort_source": "runtime_turn_context",
+                "actual_dispatch_evidence": "child_runtime_attested",
+            },
+            "model_routing": {
+                "enabled": True,
+                "reasoning_effort": {"source": "user_session", "value": "xhigh"},
+            },
+            "rounds": [
+                {
+                    "round_id": "round-001",
+                    "lanes": [
+                        {
+                            "id": "verify-01",
+                            "enabled": True,
+                            "routing": {
+                                "status": "planned",
+                                "selected": {"model": "gpt-5.6-sol", "effort": "xhigh"},
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "session.jsonl"
+            rows = [
+                {"type": "session_meta", "payload": {"id": "fixture-routing"}},
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "sub_agent_activity",
+                        "event_id": "spawn-1",
+                        "agent_thread_id": "fixture-child",
+                        "kind": "started",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "collaboration.spawn_agent",
+                        "call_id": "spawn-1",
+                        "arguments": json.dumps(
+                            {
+                                "task_name": "verify_01",
+                                "model": "gpt-5.6-sol",
+                                "thinking": "xhigh",
+                            }
+                        ),
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "spawn-1",
+                        "output": '{"task_name":"verify_01"}',
+                    },
+                },
+            ]
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            observed = runtime_harness.routed_dispatch_events(
+                path,
+                "fixture-routing",
+                start_line=1,
+                through_line=4,
+                orchestration=orchestration,
+            )
+            self.assertEqual("verify-01", observed[0]["lane_id"])
+            rows[2]["payload"]["arguments"] = json.dumps({"task_name": "verify_01"})
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                runtime_harness.RuntimeHarnessError,
+                "must dispatch gpt-5.6-sol/xhigh",
+            ):
+                runtime_harness.routed_dispatch_events(
+                    path,
+                    "fixture-routing",
+                    start_line=1,
+                    through_line=4,
+                    orchestration=orchestration,
+                )
+
+    def test_raw_routed_dispatches_follow_attempt_order_for_fallback(self) -> None:
+        orchestration = {
+            "model_routing_requirement": {
+                "mode": "mandatory_native",
+                "fallback": "fail_closed",
+                "effort_source": "runtime_turn_context",
+                "actual_dispatch_evidence": "child_runtime_attested",
+            },
+            "model_routing": {
+                "enabled": True,
+                "reasoning_effort": {"source": "user_session", "value": "xhigh"},
+            },
+            "rounds": [
+                {
+                    "round_id": "round-001",
+                    "lanes": [
+                        {
+                            "id": "implement-01",
+                            "enabled": True,
+                            "routing": {
+                                "status": "planned",
+                                "selected": {"model": "gpt-5.6-terra", "effort": "xhigh"},
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        runner = {
+            "agents": [
+                {
+                    "round_id": "round-001",
+                    "lane_id": "implement-01",
+                    "attempts": [
+                        {
+                            "attempt_id": "attempt-1",
+                            "route": {"model": "gpt-5.6-terra", "effort": "xhigh"},
+                            "lifecycle": {"agent_id": "child-terra"},
+                        },
+                        {
+                            "attempt_id": "attempt-2",
+                            "route": {"model": "gpt-5.6-sol", "effort": "xhigh"},
+                            "lifecycle": {"agent_id": "child-sol"},
+                        },
+                    ],
+                }
+            ]
+        }
+        rows = [{"type": "session_meta", "payload": {"id": "fixture-fallback"}}]
+        for index, (model, agent_id) in enumerate(
+            (("gpt-5.6-terra", "child-terra"), ("gpt-5.6-sol", "child-sol")),
+            start=1,
+        ):
+            rows.extend(
+                [
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "sub_agent_activity",
+                            "event_id": f"spawn-{index}",
+                            "agent_thread_id": agent_id,
+                            "kind": "started",
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "collaboration.spawn_agent",
+                            "call_id": f"spawn-{index}",
+                            "arguments": json.dumps(
+                                {
+                                    "task_name": "implement_01",
+                                    "model": model,
+                                    "thinking": "xhigh",
+                                }
+                            ),
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": f"spawn-{index}",
+                            "output": json.dumps({"task_name": "implement_01"}),
+                        },
+                    },
+                ]
+            )
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "session.jsonl"
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            runtime_root = Path(temp) / "runtime"
+            sessions = runtime_root / "sessions"
+            sessions.mkdir(parents=True)
+            for model, agent_id in (
+                ("gpt-5.6-terra", "child-terra"),
+                ("gpt-5.6-sol", "child-sol"),
+            ):
+                (sessions / f"rollout-{agent_id}.jsonl").write_text(
+                    "\n".join(
+                        json.dumps(row)
+                        for row in (
+                            {"type": "session_meta", "payload": {"id": agent_id}},
+                            {
+                                "type": "turn_context",
+                                "payload": {"model": model, "effort": "xhigh"},
+                            },
+                        )
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            participants = [
+                {
+                    "agent_id": "child-terra",
+                    "execution_ref": "round-001:implement-01:attempt-1",
+                },
+                {
+                    "agent_id": "child-sol",
+                    "execution_ref": "round-001:implement-01:attempt-2",
+                },
+            ]
+            observed = runtime_harness.routed_dispatch_events(
+                path,
+                "fixture-fallback",
+                start_line=1,
+                through_line=len(rows),
+                orchestration=orchestration,
+                runner_evidence=runner,
+                participants=participants,
+                runtime_root=runtime_root,
+            )
+            self.assertEqual(
+                ["gpt-5.6-terra", "gpt-5.6-sol"],
+                [item["model"] for item in observed],
+            )
+            self.assertEqual(
+                ["gpt-5.6-terra", "gpt-5.6-sol"],
+                [item["child_session"]["model"] for item in observed],
+            )
+            sol_path = sessions / "rollout-child-sol.jsonl"
+            sol_path.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {"type": "session_meta", "payload": {"id": "child-sol"}},
+                        {
+                            "type": "turn_context",
+                            "payload": {"model": "gpt-5.6-terra", "effort": "xhigh"},
+                        },
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                runtime_harness.RuntimeHarnessError,
+                "child runtime for attempt-2",
+            ):
+                runtime_harness.routed_dispatch_events(
+                    path,
+                    "fixture-fallback",
+                    start_line=1,
+                    through_line=len(rows),
+                    orchestration=orchestration,
+                    runner_evidence=runner,
+                    participants=participants,
+                    runtime_root=runtime_root,
+                )
+            rows[2]["payload"]["arguments"] = json.dumps(
+                {
+                    "task_name": "implement_01",
+                    "model": "gpt-5.6-sol",
+                    "thinking": "xhigh",
+                }
+            )
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                runtime_harness.RuntimeHarnessError,
+                "must dispatch gpt-5.6-terra/xhigh",
+            ):
+                runtime_harness.routed_dispatch_events(
+                    path,
+                    "fixture-fallback",
+                    start_line=1,
+                    through_line=len(rows),
+                    orchestration=orchestration,
+                    runner_evidence=runner,
+                )
+
     def test_raw_completion_scenarios(self) -> None:
         for filename in (
             "normal-two-round.json",

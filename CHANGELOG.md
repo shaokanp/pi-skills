@@ -3,21 +3,23 @@
 ## Unreleased
 
 <!-- pi-skills:unreleased id=explain version=1.0.1 -->
-<!-- pi-skills:unreleased id=agent-workflow version=0.3.3 -->
 <!-- pi-skills:unreleased id=write-good-goal version=1.0.1 -->
 
 - Added a portable/strict-local session doctor, fail-closed new-skill scaffold,
   bilingual guide checks, and deterministic registry/changelog version markers.
 - Kept Gitleaks in the public publish gate and ignored runtime cache noise when
   checking source-to-production parity.
-- Enabled responsibility-based model routing by default for new Codex native
-  workflows, retained `off` only as an explicit compatibility rollback, and
-  fail closed when current host capabilities or session effort are unavailable.
+- Made Codex model routing mandatory for every new native workflow, inherited
+  reasoning effort automatically from runtime `turn_context`, required a v3
+  model/thinking-selectable spawn contract, rejected foreign session evidence,
+  and bound final validation to ordered spawn/start events plus each child
+  session's actual model and effort instead of Lead-recorded route claims alone.
 - Fixed the execution-efficiency activation bug: new Codex and Claude Code
   native workflows now use isolated context, notification-first waits, compact
   receipts, and budgets by default instead of requiring an opt-in flag.
-- Kept manual simulation unchanged, retained `off` as an explicit compatibility
-  rollback, and continued validating existing `explicit_opt_in` workspaces.
+- Kept manual simulation unchanged, retained execution-efficiency `off` as an
+  explicit compatibility rollback, and continued validating existing routed
+  and unrouted workspaces without migration.
 - Scoped the Gitleaks directory scan to an archive of tracked `HEAD`, preventing
   ignored local agent worktrees from falsely blocking an otherwise clean public
   release while retaining complete tracked-tree and Git-history coverage.
@@ -72,6 +74,24 @@
   thinking, judgment, ambiguity, and high risk; Terra handles bounded execution.
 - Locked one user-session reasoning effort per workflow and required every
   planned, dispatched, fallback, escalation, and actual route to inherit it.
+
+## 1.0.0 - 2026-07-13
+
+<!-- pi-skills:release id=agent-workflow version=1.0.0 -->
+
+- Rebuilt Agent Workflow around one clean-context Orchestrator, a thin
+  first-principles skill, and a transient deterministic Phase runtime.
+- Made top/worker model routing mandatory, inherited the current reasoning
+  setting, and fail closed when actual-route or capability evidence is absent.
+- Replaced polling and partial-progress wakeups with terminal-only Phase
+  barriers, bounded exact-lineage recovery, crash reconciliation, and durable
+  digest-bound artifacts.
+- Added isolated source-writing transactions, independent clean top-model
+  verification, legacy read-only inspection, exact token/completion accounting,
+  and a quality-first frozen canary gate.
+- Promoted vNext as the default with no hidden opt-in after 25/25 paired canary
+  passes, unchanged 4/4/4 quality medians, 85.71% fewer coordinator
+  completions, and 57.70% lower median total tokens.
 - Added responsibility-routing policy/capability/decision schema v2; active v1
   routed runs remain pinned instead of being silently reinterpreted.
 - Added fail-closed planned and final validation for unavailable routes,

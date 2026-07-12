@@ -1,0 +1,33 @@
+{
+  "schema_version": "agent-workflow.phase-plan.v1",
+  "phase_id": "001-research",
+  "generation_id": "generation-001",
+  "predecessor_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "authority_revision": 1,
+  "caused_by": [],
+  "intent": {
+    "reason": "Establish the evidence needed for the next decision.",
+    "expected_state_change": "Criterion AC-1 has a compact evidence receipt."
+  },
+  "phase_budget_seconds": 600,
+  "tasks": [
+    {
+      "task_id": "research-contract",
+      "lineage_id": "lineage-contract",
+      "criterion_id": "AC-1",
+      "criterion_revision": 1,
+      "role": "worker",
+      "work_mode": "read",
+      "packet_path": "phases/001-research/tasks/research-contract/packet.md",
+      "packet_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_refs": [
+        "evidence/pre-slice-baseline.json"
+      ],
+      "input_sha256": {
+        "evidence/pre-slice-baseline.json": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "write_roots": [],
+      "execution_deadline_seconds": 300
+    }
+  ]
+}

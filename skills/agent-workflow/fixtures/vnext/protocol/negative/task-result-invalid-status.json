@@ -1,0 +1,27 @@
+{
+  "schema_version": "agent-workflow.task-result.v1",
+  "workflow_id": "fixture-workflow",
+  "phase_id": "001-research",
+  "task_id": "research-contract",
+  "lineage_id": "lineage-contract",
+  "attempt": 1,
+  "status": "still-running",
+  "terminal_reason": "not-terminal",
+  "actual_route": null,
+  "output_ref": null,
+  "output_sha256": null,
+  "evidence_refs": [],
+  "evidence_sha256": {},
+  "checks": [],
+  "changed_paths": [],
+  "started_at": "2026-07-12T00:00:00Z",
+  "finished_at": "2026-07-12T00:00:10Z",
+  "elapsed_ms": 10000,
+  "token_usage": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "source": "codex_terminal_events",
+    "confidence": "exact"
+  }
+}

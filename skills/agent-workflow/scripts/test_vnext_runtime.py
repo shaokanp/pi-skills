@@ -1,0 +1,2770 @@
+#!/usr/bin/env python3
+"""Slice 1 tests for the read-only routed Phase tracer."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import signal
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+from copy import deepcopy
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+FIXTURE_ROOT = SCRIPT_DIR.parent / "fixtures" / "vnext" / "protocol" / "valid"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from artifact_store import ArtifactError, create_once_json
+import baseline_gate
+import workflow_runtime
+from source_workspace import (
+    attest_writer_permissions,
+    load_isolated_phase,
+    prepare_isolated_phase,
+    writer_profile_bytes,
+)
+from phase_protocol import ProtocolError, _validate_source_patch_replay, validate_contract
+from recovery_runtime import causal_predecessor_sha256
+from workflow_runtime import (
+    _RUNTIME_BUNDLE_FILES,
+    CodexExecConfig,
+    HumanGateRequired,
+    RawExecution,
+    RuntimeFailure,
+    _cleanup_codex_auth,
+    _drain_stream,
+    _attest_worker_permissions,
+    _prepare_codex_home,
+    _probe_runtime_refs,
+    _parse_jsonl,
+    _process_identity,
+    _repository_root_for,
+    _resource_admission,
+    _runtime_bundle_sha256,
+    _resolve_pinned_runtime,
+    _raw_from_supervisor_terminal,
+    _seal_runtime_bundle,
+    _seal_deadlines,
+    _seal_generation_claim,
+    _scrub_stale_codex_auth,
+    _validate_typed_output,
+    _validate_admission_inputs,
+    _validate_source_write_capability,
+    cancel_run,
+    codex_task_executor,
+    main,
+    rebuild_view,
+    reconcile_run,
+    run_read_only_phase,
+)
+
+
+def digest(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def fixture(name: str) -> dict[str, object]:
+    return json.loads((FIXTURE_ROOT / name).read_text())
+
+
+def capability_receipt(
+    statuses: dict[str, str], provenance: dict[str, object]
+) -> dict[str, object]:
+    return {
+        "schema_version": "agent-workflow.capability-receipt.vnext.v3",
+        "capabilities": statuses,
+        "blocking_transport": {
+            "host": "codex-desktop",
+            "outer_tool": "functions.exec",
+            "inner_tool": "exec_command",
+            "outer_yield_ms": 30000,
+            "inner_yield_ms": 30000,
+            "maximum_blocking_window_ms": 30000,
+            "early_exit_observed": True,
+            "sparse_continuation_limit": 0,
+        },
+        "proofs": {
+            "blocking_wait": {
+                "terminal_json_observed": True,
+                "cell_handle_rejected": True,
+            },
+            "read_only_containment": {
+                "exact_profile_attested": True,
+                "credential_denial_attested": True,
+                "network_restricted": True,
+            },
+            "route_attestation": {
+                "persisted_turn_context": True,
+                "top_model": "gpt-5.6-sol",
+                "worker_model": "gpt-5.6-terra",
+                "reasoning_effort": "xhigh",
+            },
+            "sandbox_isolation": {"reason": "host_capability_unavailable"},
+            "cancel_reap": {
+                "owned_pgid_signal": True,
+                "live_marker_required": True,
+                "post_publish_cancel_fence": True,
+            },
+            "raw_session_audit": {
+                "thread_id_bound": True,
+                "terminal_event_required": True,
+            },
+            "accounting_evidence": {
+                "terminal_usage_required": True,
+                "confidence": "exact",
+            },
+            "generation_fence": {
+                "create_once": True,
+                "authority_revision_bound": True,
+                "predecessor_bound": True,
+                "plan_digest_bound": True,
+            },
+        },
+        "provenance": provenance,
+    }
+
+
+class ReadOnlyTracerTests(unittest.TestCase):
+    def test_source_write_probe_uses_phase_namespaced_supervisor_refs(self) -> None:
+        self.assertEqual(
+            _probe_runtime_refs("000-source-write-probe", "source-write-probe"),
+            {
+                "request_ref": "evidence/source-write-probe/runtime/watchdogs/000-source-write-probe/source-write-probe/request.json",
+                "terminal_ref": "evidence/source-write-probe/runtime/watchdogs/000-source-write-probe/source-write-probe/terminal.json",
+                "events_ref": "evidence/source-write-probe/transient/000-source-write-probe/source-write-probe/stdout.jsonl",
+                "stderr_ref": "evidence/source-write-probe/transient/000-source-write-probe/source-write-probe/stderr.log",
+            },
+        )
+
+    def test_cancel_at_terminal_fence_cannot_publish_completed_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+
+            def completed(task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                session = f"terminal-{task['task_id']}"
+                return RawExecution(
+                    0,
+                    [
+                        {"type": "thread.started", "thread_id": session},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"ok"}'}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+                    ],
+                    "",
+                    {"model": "gpt-5.6-terra", "effort": "xhigh", "session_id": session},
+                )
+
+            with self.assertRaisesRegex(RuntimeFailure, "cancel fence"):
+                run_read_only_phase(
+                    root,
+                    plan,
+                    completed,
+                    max_parallel=1,
+                    terminal_fence=lambda: cancel_run(root, 1, grace_seconds=0),
+                )
+            self.assertFalse((root / "phases/001-research/receipt.json").exists())
+            self.assertFalse((root / "phases/001-research/tasks/research-1/result.json").exists())
+
+    def direct_runtime_fence(self, root: Path) -> dict[str, object]:
+        claim_ref = "generations/claims/direct-fixture.json"
+        claim_path = create_once_json(
+            root,
+            claim_ref,
+            {"schema_version": "agent-workflow.generation-claim.vnext.v1", "generation_id": "generation-001"},
+        )
+        return {
+            "_runtime_plan_sha256": "sha256:" + "1" * 64,
+            "_runtime_generation_claim_ref": claim_ref,
+            "_runtime_generation_claim_sha256": digest(claim_path.read_bytes()),
+            "_runtime_bundle_sha256": _runtime_bundle_sha256(),
+            "_runtime_boot_identity": _process_identity(1),
+        }
+
+    def test_materialized_jsonl_event_count_fails_closed(self) -> None:
+        payload = b'{"type":"item"}\n' * 4097
+        with self.assertRaisesRegex(RuntimeFailure, "event-count cap"):
+            _parse_jsonl(payload)
+
+    def test_resource_admission_fails_closed_on_low_fd_or_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            with mock.patch("workflow_runtime.resource.getrlimit", return_value=(32, 32)):
+                with self.assertRaisesRegex(RuntimeFailure, "file-descriptor"):
+                    _resource_admission(root, workflow, 2, log_limit_bytes=4096)
+            disk = mock.Mock(free=1024)
+            with (
+                mock.patch("workflow_runtime.resource.getrlimit", return_value=(1024, 1024)),
+                mock.patch("workflow_runtime.shutil.disk_usage", return_value=disk),
+            ):
+                with self.assertRaisesRegex(RuntimeFailure, "disk floor"):
+                    _resource_admission(root, workflow, 2, log_limit_bytes=4096)
+
+    def test_stale_auth_scrub_requires_safe_file_and_no_live_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            auth = root / "runtime/codex-home/auth.json"
+            auth.parent.mkdir(parents=True)
+            auth.write_text('{"tokens":{"access_token":"stale"}}\n')
+            auth.chmod(0o600)
+            self.assertTrue(_scrub_stale_codex_auth(root))
+            self.assertFalse(auth.exists())
+            auth.write_text('{"tokens":{"access_token":"unsafe"}}\n')
+            auth.chmod(0o644)
+            with self.assertRaisesRegex(RuntimeFailure, "permissions are unsafe"):
+                _scrub_stale_codex_auth(root)
+
+    def test_deadline_seal_does_not_reset_on_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            first, first_monotonic = _seal_deadlines(root, workflow, plan)
+            time.sleep(0.02)
+            second, second_monotonic = _seal_deadlines(root, workflow, plan)
+            self.assertEqual(second, first)
+            self.assertAlmostEqual(second_monotonic, first_monotonic, delta=0.1)
+            workflow["created_at"] = "2000-01-01T00:00:00Z"
+            with self.assertRaisesRegex(RuntimeFailure, "deadline seal drifted"):
+                _seal_deadlines(root, workflow, plan)
+
+    def test_generation_claim_uses_one_predecessor_authority_contention_key(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workflow = fixture("workflow.json")
+            plan = fixture("phase-plan.json")
+            payload = (json.dumps(plan, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            ref, path = _seal_generation_claim(root, workflow, plan, payload)
+            self.assertTrue(ref.startswith("generations/claims/"))
+            winner = json.loads(path.read_text())
+            self.assertEqual(winner["generation_id"], plan["generation_id"])
+            competing = deepcopy(plan)
+            competing["generation_id"] = "generation-competitor"
+            competing_payload = (json.dumps(competing, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            with self.assertRaisesRegex(RuntimeFailure, "contention lost"):
+                _seal_generation_claim(root, workflow, competing, competing_payload)
+            self.assertEqual(json.loads(path.read_text())["generation_id"], plan["generation_id"])
+
+    def test_reconcile_cli_rebuilds_view_and_checks_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            summary = reconcile_run(root, 1, grace_seconds=0.0)
+            self.assertEqual(summary["status"], "reconciled")
+            self.assertEqual(summary["attempt_count"], 0)
+            view = json.loads((root / "view.json").read_text())
+            self.assertEqual(view["workflow_id"], "fixture-workflow")
+            self.assertEqual(rebuild_view(root), view)
+            with self.assertRaisesRegex(RuntimeFailure, "authority revision"):
+                reconcile_run(root, 2)
+
+    def test_runner_sigkill_reconcile_materializes_task_and_phase_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            fake = root / "fake-reconcile-codex"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import json, os, pathlib, sys, time
+args = sys.argv[1:]
+model = args[args.index('-m') + 1]
+thread_id = 'reconcile-thread'
+home = pathlib.Path(os.environ['CODEX_HOME'])
+session = home / 'sessions' / 'reconcile.jsonl'
+session.parent.mkdir(parents=True, exist_ok=True)
+context = {'model': model, 'effort': 'xhigh', 'workspace_roots': [str(pathlib.Path.cwd())], 'sandbox_policy': {'type': 'read-only'}, 'permission_profile': {'type': 'managed', 'file_system': {'type': 'restricted', 'entries': [{'path': {'type': 'special', 'value': {'kind': 'minimal'}}, 'access': 'read'}, {'path': {'type': 'path', 'path': str(pathlib.Path.cwd())}, 'access': 'read'}, {'path': {'type': 'path', 'path': str(home / 'tmp' / 'arg0' / 'codex-arg0fixture')}, 'access': 'read'}]}, 'network': 'restricted'}}
+session.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': thread_id}}) + '\\n' + json.dumps({'type': 'turn_context', 'payload': context}) + '\\n')
+time.sleep(0.4)
+print(json.dumps({'type': 'thread.started', 'thread_id': thread_id}))
+print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '{\"answer\":\"reconciled\"}'}}))
+print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output_tokens': 2}}))
+"""
+            )
+            fake.chmod(0o755)
+            helper_code = (
+                "import json,pathlib,sys;"
+                f"sys.path.insert(0,{str(SCRIPT_DIR)!r});"
+                "from workflow_runtime import CodexExecConfig,codex_task_executor,run_read_only_phase;"
+                f"root=pathlib.Path({str(root)!r});"
+                "plan=json.loads((root/'plan-helper.json').read_text());"
+                f"cfg=CodexExecConfig(run_root=root,repo_root=root,codex_home=root/'codex-home',codex_binary={str(fake)!r},workflow_id='fixture-workflow',authority_revision=1,terminate_grace_seconds=0.1);"
+                "run_read_only_phase(root,plan,codex_task_executor(cfg),max_parallel=1)"
+            )
+            (root / "plan-helper.json").write_text(json.dumps(plan))
+            helper = subprocess.Popen(
+                [sys.executable, "-c", helper_code],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            active = root / "runtime/processes/001-research/research-1.json"
+            deadline = time.monotonic() + 3
+            while not active.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(active.exists())
+            os.killpg(helper.pid, signal.SIGKILL)
+            helper.wait(timeout=2)
+            terminal = root / "runtime/watchdogs/001-research/research-1/terminal.json"
+            deadline = time.monotonic() + 3
+            while not terminal.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(terminal.exists())
+            partial_events = root / "phases/001-research/tasks/research-1/attempts/001/events.jsonl"
+            partial_events.parent.mkdir(parents=True, exist_ok=True)
+            partial_events.write_bytes((root / "transient/001-research/research-1/stdout.jsonl").read_bytes())
+            summary = reconcile_run(root, 1, grace_seconds=0.1)
+            self.assertEqual(
+                summary["materialized_phase_receipts"],
+                ["phases/001-research/receipt.json"],
+            )
+            result = json.loads(
+                (root / "phases/001-research/tasks/research-1/result.json").read_text()
+            )
+            self.assertEqual(
+                result["status"],
+                "completed",
+                {"result": result, "terminal": json.loads(terminal.read_text()), "stderr": (root / "transient/001-research/research-1/stderr.log").read_text()},
+            )
+            receipt = json.loads((root / "phases/001-research/receipt.json").read_text())
+            self.assertEqual(receipt["status"], "completed")
+
+    def test_run_once_is_one_cli_transaction_and_one_terminal_json(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            workflow_source = root / "workflow-source.json"
+            plan_source = root / "plan-source.json"
+            auth_source = root / "auth.json"
+            repo.mkdir()
+            output = io.StringIO()
+            admission = {
+                "status": "admitted",
+                "workflow_ref": "workflow.json",
+                "workflow_sha256": "sha256:" + "1" * 64,
+            }
+            phase = {
+                "status": "completed",
+                "receipt_ref": "phases/001/receipt.json",
+                "receipt_sha256": "sha256:" + "2" * 64,
+            }
+            with (
+                mock.patch("workflow_runtime._admit_command", return_value=admission) as admit,
+                mock.patch("workflow_runtime._run_phase_command", return_value=phase) as run,
+                mock.patch("sys.stdout", output),
+            ):
+                exit_code = main(
+                    [
+                        "run-once",
+                        "--root",
+                        os.fspath(root),
+                        "--repo",
+                        os.fspath(repo),
+                        "--workflow-source",
+                        os.fspath(workflow_source),
+                        "--plan-source",
+                        os.fspath(plan_source),
+                        "--auth-source",
+                        os.fspath(auth_source),
+                        "--codex-binary",
+                        "/fixture/codex",
+                        "--max-parallel",
+                        "4",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(output.getvalue().splitlines()), 1)
+            self.assertEqual(json.loads(output.getvalue())["admission"], admission)
+            admit.assert_called_once_with(
+                root, repo, workflow_source, "/fixture/codex"
+            )
+            run.assert_called_once_with(
+                root, repo, plan_source, auth_source, "/fixture/codex", 4
+            )
+
+    def test_dirty_overlap_cli_returns_typed_human_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            output = io.StringIO()
+            with (
+                mock.patch(
+                    "workflow_runtime._run_phase_command",
+                    side_effect=HumanGateRequired("writer roots overlap existing dirty paths: src/a"),
+                ),
+                mock.patch("sys.stdout", output),
+            ):
+                exit_code = main(
+                    [
+                        "run-phase",
+                        "--root",
+                        os.fspath(root),
+                        "--repo",
+                        os.fspath(root),
+                        "--plan-source",
+                        os.fspath(root / "plan.json"),
+                        "--auth-source",
+                        os.fspath(root / "auth.json"),
+                        "--max-parallel",
+                        "1",
+                    ]
+                )
+            self.assertEqual(exit_code, 3)
+            self.assertEqual(json.loads(output.getvalue())["status"], "human_gate")
+
+    def test_runtime_bundle_covers_all_executable_control_modules(self) -> None:
+        self.assertEqual(
+            set(_RUNTIME_BUNDLE_FILES),
+            {
+                "app_resume_adapter.py",
+                "artifact_store.py",
+                "baseline_gate.py",
+                "phase_protocol.py",
+                "process_supervisor.py",
+                "recovery_runtime.py",
+                "source_workspace.py",
+                "vnext_accounting.py",
+                "workflow_runtime.py",
+            },
+        )
+        self.assertRegex(_runtime_bundle_sha256(), r"^sha256:[0-9a-f]{64}$")
+
+    def test_admission_bundle_pin_is_create_once_replayable_and_survives_selector_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            expected = _runtime_bundle_sha256()
+            first = _seal_runtime_bundle(root)
+            second = _seal_runtime_bundle(root)
+            self.assertEqual(first, second)
+            self.assertEqual(first, root / "runtime-bundle/workflow_runtime.py")
+            self.assertEqual(
+                {path.name for path in (root / "runtime-bundle").iterdir()},
+                set(_RUNTIME_BUNDLE_FILES),
+            )
+            create_once_json(root, "workflow.json", {"runtime_bundle": {"sha256": expected}})
+            with mock.patch("workflow_runtime._runtime_bundle_sha256", return_value="sha256:" + "f" * 64):
+                self.assertEqual(_resolve_pinned_runtime(root, expected), first)
+            observed = subprocess.run(
+                [sys.executable, os.fspath(first), "pinned-runtime", "--root", os.fspath(root)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(observed.returncode, 0, observed.stderr)
+            self.assertEqual(json.loads(observed.stdout)["runtime_bundle_sha256"], expected)
+
+    def test_partial_admission_bundle_crash_repairs_before_workflow_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            bundle_root = root / "runtime-bundle"
+            bundle_root.mkdir()
+            first_name = _RUNTIME_BUNDLE_FILES[0]
+            (bundle_root / first_name).write_bytes((SCRIPT_DIR / first_name).read_bytes())
+            self.assertFalse((root / "workflow.json").exists())
+            pinned = _seal_runtime_bundle(root)
+            self.assertEqual(pinned, bundle_root / "workflow_runtime.py")
+            self.assertEqual({path.name for path in bundle_root.iterdir()}, set(_RUNTIME_BUNDLE_FILES))
+
+    def test_missing_or_drifted_pinned_bundle_blocks_without_writer_fallback(self) -> None:
+        for mutation in ("missing", "drift"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw).resolve()
+                expected = _runtime_bundle_sha256()
+                pinned = _seal_runtime_bundle(root)
+                create_once_json(root, "workflow.json", {"runtime_bundle": {"sha256": expected}})
+                member = root / "runtime-bundle/artifact_store.py"
+                if mutation == "missing":
+                    member.unlink()
+                else:
+                    member.write_text("# drift\n")
+                output = io.StringIO()
+                with mock.patch("sys.stdout", output):
+                    exit_code = main(["pinned-runtime", "--root", os.fspath(root)])
+                self.assertEqual(exit_code, 4)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["status"], "blocked_incompatible_release")
+                self.assertNotIn("fallback", result)
+                self.assertFalse((root / "orchestration.json").exists())
+
+    def test_json_schema_enum_and_const_do_not_treat_boolean_as_number(self) -> None:
+        with self.assertRaisesRegex(RuntimeFailure, "enum"):
+            _validate_typed_output(True, {"enum": [1]})
+        with self.assertRaisesRegex(RuntimeFailure, "const"):
+            _validate_typed_output(False, {"const": 0})
+        _validate_typed_output(1.0, {"enum": [1]})
+
+    def test_permission_attestation_rejects_every_extra_read_or_write(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            worker_root = root / "worker"
+            codex_home = root / "codex-home"
+            worker_root.mkdir()
+            context = {
+                "workspace_roots": [str(worker_root)],
+                "sandbox_policy": {"type": "read-only"},
+                "permission_profile": {
+                    "type": "managed",
+                    "network": "restricted",
+                    "file_system": {
+                        "type": "restricted",
+                        "entries": [
+                            {
+                                "path": {
+                                    "type": "special",
+                                    "value": {"kind": "minimal"},
+                                },
+                                "access": "read",
+                            },
+                            {
+                                "path": {"type": "path", "path": str(worker_root)},
+                                "access": "read",
+                            },
+                            {
+                                "path": {
+                                    "type": "path",
+                                    "path": str(codex_home / "tmp/arg0/codex-arg0fixture"),
+                                },
+                                "access": "read",
+                            },
+                        ],
+                    },
+                },
+            }
+            self.assertIsNone(_attest_worker_permissions(context, worker_root, codex_home))
+            extra_read = deepcopy(context)
+            extra_read["permission_profile"]["file_system"]["entries"].append(
+                {
+                    "path": {"type": "path", "path": str(root / "credential")},
+                    "access": "read",
+                }
+            )
+            self.assertIn(
+                "unexpected readable path",
+                _attest_worker_permissions(extra_read, worker_root, codex_home),
+            )
+            extra_write = deepcopy(context)
+            extra_write["permission_profile"]["file_system"]["entries"][1]["access"] = "write"
+            self.assertIn(
+                "non-read access",
+                _attest_worker_permissions(extra_write, worker_root, codex_home),
+            )
+
+    def test_candidate_parent_paths_resolve_from_repository_not_workflow_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw).resolve()
+            (repository / ".git").mkdir()
+            workflow_root = repository / ".workflow" / "nested-run"
+            workflow_root.mkdir(parents=True)
+            self.assertEqual(_repository_root_for(workflow_root), repository)
+
+    def test_live_repository_evidence_detects_checkout_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw).resolve()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "fixture@example.com"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Fixture"],
+                cwd=repository,
+                check=True,
+            )
+            tracked = repository / "tracked.txt"
+            tracked.write_text("sealed\n")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            branch = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=repository,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            parent = {
+                "schema_version": "agent-workflow.vnext-pre-slice-summary.v1",
+                "head": head,
+                "branch": branch,
+                "staged_diff_sha256": digest(b""),
+                "staged_diff_bytes": 0,
+                "unstaged_diff_sha256": digest(b""),
+                "unstaged_diff_bytes": 0,
+                "untracked": [],
+            }
+            baseline = baseline_gate.collect_baseline(
+                repository,
+                untracked_includes=[],
+                parent_summary=parent,
+            )
+            self.assertEqual(
+                baseline_gate.current_repository_evidence(repository, baseline),
+                baseline_gate.repository_evidence(baseline),
+            )
+            tracked.write_text("drifted\n")
+            self.assertNotEqual(
+                baseline_gate.current_repository_evidence(repository, baseline),
+                baseline_gate.repository_evidence(baseline),
+            )
+
+    def build_run(self, root: Path, *, task_count: int = 2) -> dict[str, object]:
+        evidence = b'{"baseline":"fixture"}\n'
+        evidence_path = root / "evidence" / "pre-slice-baseline.json"
+        evidence_path.parent.mkdir(parents=True)
+        evidence_path.write_bytes(evidence)
+        workflow = fixture("workflow.json")
+        workflow["created_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        workflow["baseline_sha256"] = digest(evidence)
+        create_once_json(root, "workflow.json", workflow)
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string"}},
+        }
+        schema_bytes = json.dumps(schema).encode()
+        schema_path = root / "schemas" / "worker-output.json"
+        schema_path.parent.mkdir(parents=True)
+        schema_path.write_bytes(schema_bytes)
+        plan = fixture("phase-plan.json")
+        plan["predecessor_sha256"] = digest(evidence)
+        template = plan["tasks"][0]
+        tasks = []
+        for index in range(task_count):
+            task = deepcopy(template)
+            task_id = f"research-{index + 1}"
+            task.update({
+                "task_id": task_id,
+                "lineage_id": f"lineage-{index + 1}",
+                "role": "worker" if index % 2 == 0 else "top",
+                "packet_path": f"phases/001-research/tasks/{task_id}/packet.json",
+                "input_refs": ["evidence/pre-slice-baseline.json"],
+                "input_sha256": {"evidence/pre-slice-baseline.json": digest(evidence)},
+            })
+            packet = {
+                "schema_version": "agent-workflow.task-packet.vnext.v1",
+                "prompt": f"Return the bounded answer for {task_id}.",
+                "output_schema_ref": "schemas/worker-output.json",
+                "output_schema_sha256": digest(schema_bytes),
+            }
+            packet_bytes = (json.dumps(packet, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            packet_path = root / task["packet_path"]
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_bytes(packet_bytes)
+            task["packet_sha256"] = digest(packet_bytes)
+            tasks.append(task)
+        plan["tasks"] = tasks
+        return plan
+
+    def source_baseline(self, repository: Path) -> dict[str, object]:
+        staged = baseline_gate._diff(repository, cached=True, excludes=[], binary=False)
+        unstaged = baseline_gate._diff(repository, cached=False, excludes=[], binary=False)
+        untracked = [
+            item.decode()
+            for item in baseline_gate._git(
+                repository, "ls-files", "--others", "--exclude-standard", "-z"
+            ).split(b"\0")
+            if item
+        ]
+        parent = {
+            "schema_version": "agent-workflow.vnext-pre-slice-summary.v1",
+            "head": baseline_gate._git(repository, "rev-parse", "HEAD").decode().strip(),
+            "branch": baseline_gate._git(repository, "branch", "--show-current").decode().strip(),
+            "staged_diff_sha256": digest(staged),
+            "staged_diff_bytes": len(staged),
+            "unstaged_diff_sha256": digest(unstaged),
+            "unstaged_diff_bytes": len(unstaged),
+            "untracked": [
+                {
+                    "path": relative,
+                    "sha256": digest((repository / relative).read_bytes()),
+                    "bytes": (repository / relative).stat().st_size,
+                }
+                for relative in sorted(untracked)
+            ],
+        }
+        return baseline_gate.collect_baseline(repository, parent_summary=parent)
+
+    def test_seal_final_validates_before_create_once_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            candidate = fixture("final.json")
+            candidate["runtime_bundle_sha256"] = workflow["runtime_bundle"]["sha256"]
+            terminal_phases = [
+                {
+                    "phase_id": Path(ref).parts[1],
+                    "generation_id": candidate["generation_id"],
+                    "status": "completed",
+                    "receipt_ref": ref,
+                    "receipt_sha256": candidate["phase_receipt_sha256"][ref],
+                }
+                for ref in candidate["phase_receipt_refs"]
+            ]
+            with (
+                mock.patch(
+                    "workflow_runtime._reconcile_run",
+                    return_value={"active": [], "materialized_phase_receipts": []},
+                ),
+                mock.patch(
+                    "workflow_runtime.build_resume_brief",
+                    return_value={"terminal_phases": terminal_phases},
+                ),
+                mock.patch(
+                    "workflow_runtime.validate_replay_candidate",
+                    return_value=candidate,
+                ) as validate_candidate,
+            ):
+                path = workflow_runtime.seal_final(root, candidate)
+                self.assertEqual(path, root.resolve() / "final.json")
+                self.assertEqual(json.loads(path.read_text()), candidate)
+                validate_candidate.assert_called_once()
+                with self.assertRaisesRegex(RuntimeFailure, "final"):
+                    workflow_runtime.seal_final(root, candidate)
+
+    def test_seal_final_rejects_cancel_and_invalid_candidate_before_write(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            candidate = fixture("final.json")
+            candidate["runtime_bundle_sha256"] = workflow["runtime_bundle"]["sha256"]
+            create_once_json(
+                root,
+                "amendments/cancel.json",
+                {
+                    "schema_version": "agent-workflow.cancel-request.vnext.v1",
+                    "workflow_id": workflow["workflow_id"],
+                    "authority_revision": 1,
+                    "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                },
+            )
+            with self.assertRaisesRegex(RuntimeFailure, "cancel"):
+                workflow_runtime.seal_final(root, candidate)
+            self.assertFalse((root / "final.json").exists())
+
+    def test_final_seal_fences_new_phase_and_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            create_once_json(root, "final.json", fixture("final.json"))
+            with self.assertRaisesRegex(RuntimeFailure, "final"):
+                cancel_run(root, 1, grace_seconds=0.0)
+            with self.assertRaisesRegex(RuntimeFailure, "final"):
+                reconcile_run(root, 1, grace_seconds=0.0)
+            with self.assertRaisesRegex(RuntimeFailure, "final"):
+                run_read_only_phase(
+                    root,
+                    plan,
+                    lambda _task, _packet: execution("late", valid=True),
+                    max_parallel=1,
+                )
+
+    def test_final_publication_serializes_concurrent_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            candidate = fixture("final.json")
+            candidate["runtime_bundle_sha256"] = workflow["runtime_bundle"]["sha256"]
+            terminal_phases = [
+                {
+                    "phase_id": Path(ref).parts[1],
+                    "generation_id": candidate["generation_id"],
+                    "status": "completed",
+                    "receipt_ref": ref,
+                    "receipt_sha256": candidate["phase_receipt_sha256"][ref],
+                }
+                for ref in candidate["phase_receipt_refs"]
+            ]
+            publish_started = threading.Event()
+            allow_publish = threading.Event()
+            original_create = workflow_runtime.create_once_json
+            original_reconcile = workflow_runtime._reconcile_run
+
+            def delayed_create(run_root: Path, relative: str, value: object) -> Path:
+                if relative == "final.json":
+                    publish_started.set()
+                    self.assertTrue(allow_publish.wait(timeout=2))
+                return original_create(run_root, relative, value)
+
+            def reconcile_for_test(*args: object, **kwargs: object) -> dict[str, object]:
+                if threading.current_thread().name == "final-publisher":
+                    return {"active": [], "materialized_phase_receipts": []}
+                return original_reconcile(*args, **kwargs)
+
+            final_errors: list[Exception] = []
+            mutation_errors: dict[str, list[Exception]] = {
+                name: []
+                for name in ("cancel", "phase", "amend", "resume", "reconcile")
+            }
+
+            def publish() -> None:
+                try:
+                    workflow_runtime.seal_final(root, candidate)
+                except Exception as exc:  # surfaced after both threads join
+                    final_errors.append(exc)
+
+            def mutate(name: str, operation: object) -> None:
+                try:
+                    operation()
+                except Exception as exc:  # expected after final wins
+                    mutation_errors[name].append(exc)
+
+            operations = {
+                "cancel": lambda: cancel_run(root, 1, grace_seconds=0.0),
+                "phase": lambda: run_read_only_phase(
+                    root,
+                    plan,
+                    lambda _task, _packet: execution("late", valid=True),
+                    max_parallel=1,
+                ),
+                "amend": lambda: workflow_runtime.seal_amendment(root, workflow, {}),
+                "resume": lambda: workflow_runtime.seal_resume_brief(
+                    root,
+                    workflow,
+                    "generation-002",
+                ),
+                "reconcile": lambda: reconcile_run(root, 1, grace_seconds=0.0),
+            }
+
+            with (
+                mock.patch(
+                    "workflow_runtime._reconcile_run",
+                    side_effect=reconcile_for_test,
+                ),
+                mock.patch(
+                    "workflow_runtime.build_resume_brief",
+                    return_value={"terminal_phases": terminal_phases},
+                ),
+                mock.patch(
+                    "workflow_runtime.validate_replay_candidate",
+                    return_value=candidate,
+                ),
+                mock.patch("workflow_runtime.create_once_json", side_effect=delayed_create),
+            ):
+                final_thread = threading.Thread(target=publish, name="final-publisher")
+                final_thread.start()
+                self.assertTrue(publish_started.wait(timeout=2))
+                mutation_threads = {
+                    name: threading.Thread(target=mutate, args=(name, operation))
+                    for name, operation in operations.items()
+                }
+                for thread in mutation_threads.values():
+                    thread.start()
+                time.sleep(0.05)
+                mutations_waited_for_final = all(
+                    thread.is_alive() for thread in mutation_threads.values()
+                )
+                allow_publish.set()
+                final_thread.join(timeout=2)
+                for thread in mutation_threads.values():
+                    thread.join(timeout=2)
+
+            self.assertTrue(mutations_waited_for_final)
+            self.assertEqual(final_errors, [])
+            for name, errors in mutation_errors.items():
+                self.assertEqual(len(errors), 1, name)
+                self.assertRegex(str(errors[0]), "final")
+            self.assertTrue((root / "final.json").is_file())
+            self.assertFalse((root / "amendments/cancel.json").exists())
+
+    def test_two_role_pinned_tasks_run_concurrently_and_emit_one_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root)
+            active = 0
+            max_active = 0
+            lock = threading.Lock()
+
+            def execute(task: dict[str, object], packet: dict[str, object]) -> RawExecution:
+                nonlocal active, max_active
+                with lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.04)
+                with lock:
+                    active -= 1
+                model = "gpt-5.6-terra" if task["role"] == "worker" else "gpt-5.6-sol"
+                session_id = f"session-{task['task_id']}"
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": session_id},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"answer": packet["prompt"]})}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 100, "output_tokens": 10}},
+                    ],
+                    stderr="",
+                    turn_context={"model": model, "effort": "xhigh", "session_id": session_id},
+                )
+
+            summary = run_read_only_phase(root, plan, execute, max_parallel=2)
+            self.assertEqual(max_active, 2)
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(summary["receipt_count"], 1)
+            self.assertEqual(summary["task_counts"]["completed"], 2)
+            self.assertEqual(summary["terminal_reason"], "all_tasks_terminal")
+            self.assertEqual(
+                summary["completion_density_source"],
+                "host_raw_session_audit_required",
+            )
+            claim = json.loads((root / summary["generation_claim_ref"]).read_text())
+            self.assertEqual(claim["generation_id"], "generation-001")
+            self.assertEqual(
+                claim["plan_sha256"],
+                digest((root / "phases/001-research/plan.json").read_bytes()),
+            )
+            receipt = json.loads((root / summary["receipt_ref"]).read_text())
+            validate_contract("phase-receipt", receipt)
+            self.assertEqual(receipt["task_counts"]["completed"], 2)
+            for task in plan["tasks"]:
+                result_path = root / f"phases/001-research/tasks/{task['task_id']}/result.json"
+                result = json.loads(result_path.read_text())
+                validate_contract("task-result", result)
+                expected = "gpt-5.6-terra" if task["role"] == "worker" else "gpt-5.6-sol"
+                self.assertEqual(result["actual_route"]["model"], expected)
+
+            with self.assertRaisesRegex(RuntimeFailure, "exactly one initial phase"):
+                run_read_only_phase(root, plan, execute, max_parallel=2)
+
+    def test_failed_initial_lineage_runs_one_evidence_bound_recovery_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            initial = self.build_run(root, task_count=1)
+
+            def execution(text: str, *, valid: bool) -> RawExecution:
+                session_id = (
+                    "019f566c-4899-7d03-83a5-3e7043b74fcd"
+                    if valid
+                    else "019f566c-4899-7d03-83a5-3e7043b74fcc"
+                )
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": session_id},
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": json.dumps({"answer": text} if valid else {"wrong": text}),
+                            },
+                        },
+                        {"type": "turn.completed", "usage": {"input_tokens": 20, "output_tokens": 5}},
+                    ],
+                    stderr="",
+                    turn_context={
+                        "model": "gpt-5.6-terra",
+                        "effort": "xhigh",
+                        "session_id": session_id,
+                    },
+                )
+
+            first = run_read_only_phase(
+                root,
+                initial,
+                lambda _task, _packet: execution("first", valid=False),
+                max_parallel=1,
+            )
+            self.assertEqual(first["status"], "failed")
+            failed_ref = "phases/001-research/tasks/research-1/result.json"
+            causal_ref = "phases/001-research/receipt.json"
+
+            recovery = deepcopy(initial)
+            recovery["phase_id"] = "002-recover"
+            recovery["caused_by"] = ["001-research"]
+            recovery["predecessor_sha256"] = causal_predecessor_sha256(
+                root,
+                recovery["caused_by"],
+            )
+            task = recovery["tasks"][0]
+            task["task_id"] = "research-recovery"
+            task["packet_path"] = "phases/002-recover/tasks/research-recovery/packet.json"
+            task["input_refs"] = [failed_ref, causal_ref]
+            task["input_sha256"] = {
+                failed_ref: digest((root / failed_ref).read_bytes()),
+                causal_ref: digest((root / causal_ref).read_bytes()),
+            }
+            original_packet = json.loads(
+                (root / initial["tasks"][0]["packet_path"]).read_text()
+            )
+            original_packet["prompt"] = "Repair the failed result once."
+            packet_payload = (
+                json.dumps(original_packet, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            packet_path = root / task["packet_path"]
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_bytes(packet_payload)
+            task["packet_sha256"] = digest(packet_payload)
+
+            failed_home = root / "runtime/codex-homes/failed-lineage-owner"
+            failed_home.mkdir(parents=True)
+            failed_result = json.loads((root / failed_ref).read_text())
+            request = {
+                "environment": {"CODEX_HOME": os.fspath(failed_home)},
+                "phase_id": "001-research",
+                "task_id": "research-1",
+            }
+            context = {
+                "model": failed_result["actual_route"]["model"],
+                "effort": failed_result["actual_route"]["reasoning_effort"],
+                "session_id": failed_result["actual_route"]["session_id"],
+            }
+            rollout = failed_home / "sessions/recovery.jsonl"
+            rollout.parent.mkdir(parents=True)
+            rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": context["session_id"]}}) + "\n")
+            with (
+                mock.patch("workflow_runtime.load_supervisor_request", return_value=(request, b"request")),
+                mock.patch("workflow_runtime._find_turn_context", return_value=context),
+                mock.patch("workflow_runtime._find_session_rollout", return_value=rollout),
+            ):
+                binding = workflow_runtime._recovery_resume_binding(root, recovery, task)
+            self.assertEqual(binding["failed_result_ref"], failed_ref)
+            self.assertEqual(binding["session_id"], failed_result["actual_route"]["session_id"])
+            self.assertEqual(binding["codex_home"], os.fspath(failed_home.resolve()))
+
+            second = run_read_only_phase(
+                root,
+                recovery,
+                lambda _task, _packet: execution("repaired", valid=True),
+                max_parallel=1,
+            )
+            self.assertEqual(second["status"], "completed")
+            self.assertTrue((root / "lineages/lineage-1/recovery.json").is_file())
+            self.assertTrue((root / "runtime/deadlines/001-research.json").is_file())
+            self.assertTrue((root / "runtime/deadlines/002-recover.json").is_file())
+
+            third = deepcopy(recovery)
+            third["phase_id"] = "003-retry-again"
+            third["caused_by"] = ["002-recover"]
+            third["predecessor_sha256"] = causal_predecessor_sha256(
+                root,
+                third["caused_by"],
+            )
+            third["tasks"][0]["task_id"] = "retry-again"
+            with self.assertRaisesRegex(RuntimeFailure, "successful lineage|already exhausted"):
+                run_read_only_phase(
+                    root,
+                    third,
+                    lambda _task, _packet: execution("again", valid=True),
+                    max_parallel=1,
+                )
+
+    def test_reconcile_repairs_claim_gap_before_publishing_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            plan_path = create_once_json(root, "phases/001-research/plan.json", plan)
+            _seal_generation_claim(root, workflow, plan, plan_path.read_bytes())
+            self.assertFalse((root / "lineages/lineage-1/origin.json").exists())
+            execution = RawExecution(
+                exit_code=0,
+                events=[
+                    {"type": "thread.started", "thread_id": "claim-gap"},
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "agent_message",
+                            "text": json.dumps({"answer": "reconciled"}),
+                        },
+                    },
+                    {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+                ],
+                stderr="",
+                turn_context={
+                    "model": "gpt-5.6-terra",
+                    "effort": "xhigh",
+                    "session_id": "claim-gap",
+                },
+            )
+            summary = run_read_only_phase(
+                root,
+                plan,
+                lambda _task, _packet: execution,
+                max_parallel=1,
+                reconciled_executions={"research-1": execution},
+            )
+            self.assertEqual(summary["status"], "completed")
+            self.assertTrue((root / "lineages/lineage-1/origin.json").is_file())
+
+    def test_reconcile_terminalizes_winning_plan_crashed_before_watchdog_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            plan_path = create_once_json(root, "phases/001-research/plan.json", plan)
+            _seal_generation_claim(root, workflow, plan, plan_path.read_bytes())
+            summary = reconcile_run(root, 1, grace_seconds=0.0)
+            self.assertEqual(summary["materialized_phase_receipts"], ["phases/001-research/receipt.json"])
+            result = json.loads(
+                (root / "phases/001-research/tasks/research-1/result.json").read_text()
+            )
+            self.assertEqual(result["status"], "not_started_interrupted")
+            self.assertEqual(result["token_usage"]["total"], 0)
+            receipt = json.loads((root / "phases/001-research/receipt.json").read_text())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertEqual(receipt["task_counts"]["not_started_interrupted"], 1)
+            self.assertTrue((root / "lineages/lineage-1/origin.json").is_file())
+
+    def test_reconcile_terminalizes_request_only_crash_before_watchdog_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            plan_path = create_once_json(root, "phases/001-research/plan.json", plan)
+            claim_ref, claim_path = _seal_generation_claim(
+                root,
+                workflow,
+                plan,
+                plan_path.read_bytes(),
+            )
+            task = plan["tasks"][0]
+            marker = "agent-workflow:fixture-workflow:001-research:research-1:request-only"
+            command = [
+                os.fspath(Path(sys.executable).resolve()),
+                "-c",
+                "pass",
+                "-c",
+                f'agent_workflow_audit_marker="{marker}"',
+            ]
+            request_ref = "runtime/watchdogs/001-research/research-1/request.json"
+            create_once_json(
+                root,
+                request_ref,
+                {
+                    "schema_version": "agent-workflow.supervisor-request.vnext.v2",
+                    "workflow_id": workflow["workflow_id"],
+                    "authority_revision": plan["authority_revision"],
+                    "generation_id": plan["generation_id"],
+                    "phase_id": plan["phase_id"],
+                    "task_id": task["task_id"],
+                    "plan_sha256": digest(plan_path.read_bytes()),
+                    "generation_claim_ref": claim_ref,
+                    "generation_claim_sha256": digest(claim_path.read_bytes()),
+                    "runtime_bundle_sha256": "sha256:" + "2" * 64,
+                    "codex_binary": os.fspath(Path(sys.executable).resolve()),
+                    "codex_binary_sha256": digest(Path(sys.executable).resolve().read_bytes()),
+                    "transport_executable_sha256": digest(Path(sys.executable).resolve().read_bytes()),
+                    "transport_adapter_sha256": None,
+                    "command": command,
+                    "command_sha256": digest(
+                        (json.dumps(command, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                    ),
+                    "cwd": str(root),
+                    "work_mode": "read",
+                    "write_roots": [],
+                    "environment": {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                    "audit_marker": marker,
+                    "deadline_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "deadline_monotonic": time.monotonic() + 60,
+                    "boot_identity": _process_identity(1),
+                    "terminate_grace_seconds": 0.1,
+                    "log_limit_bytes": 4096,
+                    "stdout_ref": "transient/001-research/research-1/stdout.jsonl",
+                    "stderr_ref": "transient/001-research/research-1/stderr.log",
+                    "receipt_ref": "runtime/watchdogs/001-research/research-1/terminal.json",
+                },
+            )
+
+            summary = reconcile_run(root, 1, grace_seconds=0.0)
+            self.assertEqual(
+                summary["materialized_phase_receipts"],
+                ["phases/001-research/receipt.json"],
+            )
+            result = json.loads(
+                (root / "phases/001-research/tasks/research-1/result.json").read_text()
+            )
+            self.assertEqual(result["status"], "not_started_interrupted")
+
+    def test_reconcile_ignores_plan_without_winning_generation_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            create_once_json(root, "phases/001-orphan/plan.json", plan)
+
+            summary = reconcile_run(root, 1, grace_seconds=0.0)
+            self.assertEqual(summary["materialized_phase_receipts"], [])
+            self.assertFalse((root / "phases/001-orphan/receipt.json").exists())
+
+    def test_reconcile_cannot_ratify_completed_worker_after_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            plan_path = create_once_json(root, "phases/001-research/plan.json", plan)
+            _seal_generation_claim(root, workflow, plan, plan_path.read_bytes())
+            create_once_json(
+                root,
+                "amendments/cancel.json",
+                {
+                    "schema_version": "agent-workflow.cancel-request.vnext.v1",
+                    "workflow_id": workflow["workflow_id"],
+                    "authority_revision": 1,
+                    "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                },
+            )
+            execution = RawExecution(
+                exit_code=0,
+                events=[
+                    {"type": "thread.started", "thread_id": "cancel-before-reconcile"},
+                    {
+                        "type": "item.completed",
+                        "item": {"type": "agent_message", "text": json.dumps({"answer": "late"})},
+                    },
+                    {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+                ],
+                stderr="",
+                turn_context={
+                    "model": "gpt-5.6-terra",
+                    "effort": "xhigh",
+                    "session_id": "cancel-before-reconcile",
+                },
+            )
+            with self.assertRaisesRegex(RuntimeFailure, "cancel fence"):
+                run_read_only_phase(
+                    root,
+                    plan,
+                    lambda _task, _packet: execution,
+                    max_parallel=1,
+                    reconciled_executions={"research-1": execution},
+                )
+            self.assertFalse((root / "phases/001-research/receipt.json").exists())
+
+    def test_source_phase_integrates_before_result_and_receipt_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
+            (repository / "src/api").mkdir(parents=True)
+            (repository / "src/web").mkdir(parents=True)
+            (repository / "src/api/value.txt").write_text("api-v1\n")
+            (repository / "src/web/value.txt").write_text("web-v1\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            baseline = self.source_baseline(repository)
+            baseline_payload = baseline_gate._canonical(baseline)
+            root = repository / ".workflow/run"
+            root.mkdir(parents=True)
+            plan = self.build_run(root, task_count=2)
+            workflow = json.loads((root / "workflow.json").read_text())
+            workflow["admission"]["profile"] = "source_write"
+            workflow["admission"]["capabilities"]["sandbox_isolation"]["status"] = "pass"
+            workflow["baseline_sha256"] = digest(baseline_payload)
+            workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            (root / workflow["baseline_ref"]).write_bytes(baseline_payload)
+            (root / "workflow.json").write_text(
+                json.dumps(workflow, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            for task, write_root in zip(plan["tasks"], ("src/api", "src/web"), strict=True):
+                task["work_mode"] = "write"
+                task["write_roots"] = [write_root]
+            plan["predecessor_sha256"] = digest(baseline_payload)
+            for task in plan["tasks"]:
+                task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
+            source_phase = prepare_isolated_phase(
+                root,
+                repository,
+                plan,
+                admission_baseline=baseline,
+            )
+            overrides = {
+                task_id: {"_runtime_worker_root": os.fspath(workspace.root)}
+                for task_id, workspace in source_phase.tasks.items()
+            }
+
+            def execute(task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                workspace = Path(task["_runtime_worker_root"])
+                target = workspace / task["write_roots"][0] / "value.txt"
+                target.write_text(f"{task['task_id']}-v2\n")
+                session = f"writer-{task['task_id']}"
+                model = "gpt-5.6-terra" if task["role"] == "worker" else "gpt-5.6-sol"
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": session},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"written"}'}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 2, "output_tokens": 1}},
+                    ],
+                    stderr="",
+                    turn_context={"model": model, "effort": "xhigh", "session_id": session},
+                )
+
+            summary = run_read_only_phase(
+                root,
+                plan,
+                execute,
+                max_parallel=2,
+                source_phase=source_phase,
+                runtime_task_overrides=overrides,
+            )
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual((repository / "src/api/value.txt").read_text(), "research-1-v2\n")
+            self.assertEqual((repository / "src/web/value.txt").read_text(), "research-2-v2\n")
+            receipt = json.loads((root / summary["receipt_ref"]).read_text())
+            self.assertEqual(receipt["integration"]["status"], "applied")
+            replay_results = {}
+            for task in plan["tasks"]:
+                result = json.loads(
+                    (root / f"phases/001-research/tasks/{task['task_id']}/result.json").read_text()
+                )
+                self.assertEqual(result["changed_paths"], [f"{task['write_roots'][0]}/value.txt"])
+                validate_contract("task-result", result)
+                replay_results[task["task_id"]] = result
+            _validate_source_patch_replay(root, plan, receipt, replay_results)
+            tampered = deepcopy(replay_results)
+            tampered["research-1"]["changed_paths"] = []
+            with self.assertRaisesRegex(ProtocolError, "do not match"):
+                _validate_source_patch_replay(root, plan, receipt, tampered)
+
+    def test_source_phase_drift_reclassifies_results_before_blocked_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
+            (repository / "src").mkdir()
+            target = repository / "src/value.txt"
+            target.write_text("base\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            baseline = self.source_baseline(repository)
+            baseline_payload = baseline_gate._canonical(baseline)
+            root = repository / ".workflow/run"
+            root.mkdir(parents=True)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            workflow["admission"]["profile"] = "source_write"
+            workflow["admission"]["capabilities"]["sandbox_isolation"]["status"] = "pass"
+            workflow["baseline_sha256"] = digest(baseline_payload)
+            workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            (root / workflow["baseline_ref"]).write_bytes(baseline_payload)
+            (root / "workflow.json").write_text(json.dumps(workflow, sort_keys=True, separators=(",", ":")) + "\n")
+            plan["tasks"][0]["work_mode"] = "write"
+            plan["tasks"][0]["write_roots"] = ["src"]
+            plan["predecessor_sha256"] = digest(baseline_payload)
+            for task in plan["tasks"]:
+                task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
+            source_phase = prepare_isolated_phase(
+                root,
+                repository,
+                plan,
+                admission_baseline=baseline,
+            )
+            workspace = source_phase.tasks["research-1"].root
+
+            def execute(task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                (Path(task["_runtime_worker_root"]) / "src/value.txt").write_text("worker\n")
+                target.write_text("human\n")
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": "writer-drift"},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"written"}'}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 2, "output_tokens": 1}},
+                    ],
+                    stderr="",
+                    turn_context={"model": "gpt-5.6-terra", "effort": "xhigh", "session_id": "writer-drift"},
+                )
+
+            summary = run_read_only_phase(
+                root,
+                plan,
+                execute,
+                max_parallel=1,
+                source_phase=source_phase,
+                runtime_task_overrides={"research-1": {"_runtime_worker_root": os.fspath(workspace)}},
+            )
+            self.assertEqual(summary["status"], "blocked")
+            self.assertEqual(target.read_text(), "human\n")
+            result = json.loads((root / "phases/001-research/tasks/research-1/result.json").read_text())
+            self.assertEqual(result["status"], "concurrent_edit_conflict")
+            self.assertEqual(result["terminal_reason"], "source_drift")
+            receipt = json.loads((root / summary["receipt_ref"]).read_text())
+            self.assertEqual(receipt["integration"]["status"], "conflict")
+            validate_contract("phase-receipt", receipt)
+
+    def test_source_phase_reconciles_after_integration_before_result_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
+            (repository / "src").mkdir()
+            target = repository / "src/value.txt"
+            target.write_text("base\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            baseline = self.source_baseline(repository)
+            baseline_payload = baseline_gate._canonical(baseline)
+            root = repository / ".workflow/run"
+            root.mkdir(parents=True)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            workflow["admission"]["profile"] = "source_write"
+            workflow["admission"]["capabilities"]["sandbox_isolation"]["status"] = "pass"
+            workflow["baseline_sha256"] = digest(baseline_payload)
+            workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            (root / workflow["baseline_ref"]).write_bytes(baseline_payload)
+            (root / "workflow.json").write_text(
+                json.dumps(workflow, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            task = plan["tasks"][0]
+            task["work_mode"] = "write"
+            task["write_roots"] = ["src"]
+            task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
+            plan["predecessor_sha256"] = digest(baseline_payload)
+            source_phase = prepare_isolated_phase(
+                root,
+                repository,
+                plan,
+                admission_baseline=baseline,
+            )
+            raw_execution = RawExecution(
+                exit_code=0,
+                events=[
+                    {"type": "thread.started", "thread_id": "writer-reconcile"},
+                    {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"written"}'}},
+                    {"type": "turn.completed", "usage": {"input_tokens": 2, "output_tokens": 1}},
+                ],
+                stderr="",
+                turn_context={"model": "gpt-5.6-terra", "effort": "xhigh", "session_id": "writer-reconcile"},
+            )
+
+            def execute(task_value: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                (Path(task_value["_runtime_worker_root"]) / "src/value.txt").write_text("worker\n")
+                return raw_execution
+
+            with mock.patch(
+                "workflow_runtime.create_once_bytes",
+                side_effect=ArtifactError("simulated result publication crash"),
+            ):
+                with self.assertRaisesRegex(RuntimeFailure, "simulated result publication crash"):
+                    run_read_only_phase(
+                        root,
+                        plan,
+                        execute,
+                        max_parallel=1,
+                        source_phase=source_phase,
+                        runtime_task_overrides={
+                            "research-1": {
+                                "_runtime_worker_root": os.fspath(
+                                    source_phase.tasks["research-1"].root
+                                )
+                            }
+                        },
+                    )
+            self.assertEqual(target.read_text(), "worker\n")
+            self.assertTrue(
+                (root / "runtime/source-write/001-research/integration-terminal.json").is_file()
+            )
+            self.assertFalse((root / "phases/001-research/receipt.json").exists())
+            loaded = load_isolated_phase(
+                root,
+                repository,
+                plan,
+                admission_baseline=baseline,
+            )
+            summary = run_read_only_phase(
+                root,
+                plan,
+                lambda _task, _packet: raw_execution,
+                max_parallel=1,
+                reconciled_executions={"research-1": raw_execution},
+                source_phase=loaded,
+            )
+            self.assertEqual(summary["status"], "completed")
+            self.assertTrue((root / summary["receipt_ref"]).is_file())
+            result = json.loads(
+                (root / "phases/001-research/tasks/research-1/result.json").read_text()
+            )
+            self.assertEqual(result["changed_paths"], ["src/value.txt"])
+
+    def test_turn_failed_beats_exit_zero_and_route_mismatch_is_typed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+
+            def failed(_task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": "failed-session"},
+                        {"type": "turn.failed", "error": {"message": "fixture failure"}},
+                    ],
+                    stderr="",
+                    turn_context={"model": "gpt-5.6-terra", "effort": "xhigh", "session_id": "failed-session"},
+                )
+
+            summary = run_read_only_phase(root, plan, failed, max_parallel=1)
+            self.assertEqual(summary["status"], "failed")
+            result = json.loads((root / "phases/001-research/tasks/research-1/result.json").read_text())
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["terminal_reason"], "codex_turn_failed")
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+
+            def wrong_route(_task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": "wrong-route"},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"ok"}'}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+                    ],
+                    stderr="",
+                    turn_context={"model": "gpt-5.6-sol", "effort": "xhigh", "session_id": "wrong-route"},
+                )
+
+            summary = run_read_only_phase(root, plan, wrong_route, max_parallel=1)
+            self.assertEqual(summary["status"], "failed")
+            result = json.loads((root / "phases/001-research/tasks/research-1/result.json").read_text())
+            self.assertEqual(result["status"], "route_attestation_failed")
+            self.assertEqual(result["terminal_reason"], "route_mismatch")
+
+    def test_adapter_failure_is_runner_error_not_false_attestation_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+
+            def broken(_task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                raise OSError("fixture adapter failure")
+
+            summary = run_read_only_phase(root, plan, broken, max_parallel=1)
+            self.assertEqual(summary["status"], "failed")
+            result = json.loads(
+                (root / "phases/001-research/tasks/research-1/result.json").read_text()
+            )
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["terminal_reason"], "runner_error")
+            self.assertIsNone(result["actual_route"])
+
+    def test_terminal_fence_runs_after_workers_and_before_results_or_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+
+            def execute(task: dict[str, object], packet: dict[str, object]) -> RawExecution:
+                session_id = f"session-{task['task_id']}"
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": session_id},
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": json.dumps({"answer": packet["prompt"]}),
+                            },
+                        },
+                        {
+                            "type": "turn.completed",
+                            "usage": {"input_tokens": 100, "output_tokens": 10},
+                        },
+                    ],
+                    stderr="",
+                    turn_context={
+                        "model": "gpt-5.6-terra",
+                        "effort": "xhigh",
+                        "session_id": session_id,
+                    },
+                )
+
+            def reject_drift() -> None:
+                raise RuntimeFailure("terminal repository fence drifted")
+
+            with self.assertRaisesRegex(RuntimeFailure, "terminal repository fence"):
+                run_read_only_phase(
+                    root,
+                    plan,
+                    execute,
+                    max_parallel=1,
+                    terminal_fence=reject_drift,
+                )
+            self.assertFalse((root / "phases/001-research/receipt.json").exists())
+            self.assertFalse(
+                (root / "phases/001-research/tasks/research-1/result.json").exists()
+            )
+
+    def test_log_drainer_caps_durable_bytes_without_backpressure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "bounded.log"
+            outcome: dict[str, object] = {}
+            _drain_stream(io.BytesIO(b"0123456789abcdef"), path, 8, outcome)
+            self.assertEqual(path.read_bytes(), b"01234567")
+            self.assertEqual(outcome["seen"], 16)
+            self.assertTrue(outcome["overflow"])
+            self.assertIsNone(outcome["error"])
+
+    def test_log_drainer_caps_parsed_jsonl_memory_to_durable_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "bounded-events.jsonl"
+            outcome: dict[str, object] = {}
+            payload = b'{"x":1}\n' * 10000
+            _drain_stream(io.BytesIO(payload), path, 128, outcome)
+            self.assertEqual(outcome["seen"], len(payload))
+            self.assertTrue(outcome["overflow"])
+            self.assertLessEqual(len(outcome["events"]), 16)
+            self.assertLessEqual(path.stat().st_size, 128)
+
+    def test_log_drainer_caps_event_object_count_even_within_durable_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "bounded-event-count.jsonl"
+            outcome: dict[str, object] = {}
+            payload = b'{"type":"tick"}\n' * 10000
+            _drain_stream(io.BytesIO(payload), path, len(payload), outcome)
+            self.assertEqual(path.read_bytes(), payload)
+            self.assertTrue(outcome["event_overflow"])
+            self.assertTrue(outcome["overflow"])
+            self.assertLessEqual(len(outcome["events"]), 4096)
+
+    def test_codex_adapter_builds_isolated_route_and_reads_persisted_context(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            schema_path = root / "schemas" / "worker-output.json"
+            schema_path.parent.mkdir()
+            schema_path.write_text(
+                json.dumps(
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["answer"],
+                        "properties": {"answer": {"type": "string"}},
+                    }
+                )
+            )
+            fake = root / "fake-codex"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+model = args[args.index('-m') + 1]
+effort_arg = next(item for item in args if item.startswith('model_reasoning_effort='))
+effort = effort_arg.split('=', 1)[1].strip('\\\"')
+thread_id = 'fake-adapter-thread'
+session = pathlib.Path(os.environ['CODEX_HOME']) / 'sessions' / 'fake.jsonl'
+session.parent.mkdir(parents=True)
+events = [
+    {'type': 'session_meta', 'payload': {'id': thread_id}},
+    {'type': 'turn_context', 'payload': {
+        'model': model,
+        'effort': effort,
+        'workspace_roots': [str(pathlib.Path.cwd())],
+        'sandbox_policy': {'type': 'read-only'},
+        'permission_profile': {
+            'type': 'managed',
+            'file_system': {
+                'type': 'restricted',
+                'entries': [
+                    {'path': {'type': 'special', 'value': {'kind': 'minimal'}}, 'access': 'read'},
+                    {'path': {'type': 'path', 'path': str(pathlib.Path.cwd())}, 'access': 'read'},
+                    {'path': {'type': 'path', 'path': str(pathlib.Path(os.environ['CODEX_HOME']) / 'tmp' / 'arg0' / 'codex-arg0fixture')}, 'access': 'read'},
+                ],
+            },
+            'network': 'restricted',
+        },
+    }},
+]
+session.write_text(''.join(json.dumps(item) + '\\n' for item in events))
+print(json.dumps({'type': 'thread.started', 'thread_id': thread_id}))
+print(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': '{\\\"answer\\\":\\\"adapter-ok\\\"}'}}))
+print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 7, 'output_tokens': 3}}))
+print(json.dumps(args), file=sys.stderr)
+"""
+            )
+            fake.chmod(0o755)
+            config = CodexExecConfig(
+                run_root=root,
+                repo_root=root,
+                codex_home=codex_home,
+                codex_binary=os.fspath(fake),
+                log_limit_bytes=4096,
+            )
+            execute = codex_task_executor(config)
+            observed = execute(
+                {
+                    "task_id": "adapter-probe",
+                    "role": "worker",
+                    "execution_deadline_seconds": 5,
+                    **self.direct_runtime_fence(root),
+                },
+                {"output_schema_ref": "schemas/worker-output.json", "prompt": "bounded"},
+            )
+            self.assertEqual(observed.exit_code, 0)
+            self.assertFalse(observed.adapter_error)
+            self.assertFalse(observed.log_limit_exceeded)
+            self.assertEqual(
+                observed.turn_context,
+                {
+                    "model": "gpt-5.6-terra",
+                    "effort": "xhigh",
+                    "session_id": "fake-adapter-thread",
+                    "workspace_roots": [str(root.resolve())],
+                    "sandbox_policy": {"type": "read-only"},
+                    "permission_profile": {
+                        "type": "managed",
+                        "file_system": {
+                            "type": "restricted",
+                            "entries": [
+                                {
+                                    "path": {
+                                        "type": "special",
+                                        "value": {"kind": "minimal"},
+                                    },
+                                    "access": "read",
+                                },
+                                {
+                                    "path": {"type": "path", "path": str(root.resolve())},
+                                    "access": "read",
+                                },
+                                {
+                                    "path": {
+                                        "type": "path",
+                                        "path": str(
+                                            (codex_home / "tmp" / "arg0" / "codex-arg0fixture").resolve()
+                                        ),
+                                    },
+                                    "access": "read",
+                                },
+                            ],
+                        },
+                        "network": "restricted",
+                    },
+                },
+            )
+            self.assertEqual(
+                [event["type"] for event in observed.events],
+                ["thread.started", "item.completed", "turn.completed"],
+            )
+            self.assertNotIn('"--ignore-user-config"', observed.stderr)
+            self.assertNotIn('"--sandbox"', observed.stderr)
+            self.assertIn('developer_instructions=', observed.stderr)
+
+    def test_invalid_typed_output_and_stale_phase_fences_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+
+            def invalid(_task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": "invalid-output"},
+                        {
+                            "type": "item.completed",
+                            "item": {"type": "agent_message", "text": '{"wrong":123}'},
+                        },
+                        {
+                            "type": "turn.completed",
+                            "usage": {"input_tokens": 10, "output_tokens": 2},
+                        },
+                    ],
+                    stderr="",
+                    turn_context={
+                        "model": "gpt-5.6-terra",
+                        "effort": "xhigh",
+                        "session_id": "invalid-output",
+                    },
+                )
+
+            summary = run_read_only_phase(root, plan, invalid, max_parallel=1)
+            self.assertEqual(summary["status"], "failed")
+            result = json.loads(
+                (root / "phases/001-research/tasks/research-1/result.json").read_text()
+            )
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["terminal_reason"], "invalid_typed_output")
+
+        for field, value, message in (
+            ("authority_revision", 999, "authority revision"),
+            ("generation_id", "generation-stale", "generation-001"),
+            ("phase_id", "002-repeat", "001-"),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                plan = self.build_run(root, task_count=1)
+                plan[field] = value
+                with self.assertRaisesRegex(RuntimeFailure, message):
+                    run_read_only_phase(root, plan, invalid, max_parallel=1)
+
+    def test_cancel_signals_active_group_and_terminalizes_queued_task(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=2)
+            fake = root / "fake-sleeper"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import json, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print(json.dumps({'type': 'thread.started', 'thread_id': 'cancelled-worker'}), flush=True)
+while True:
+    time.sleep(0.1)
+"""
+            )
+            fake.chmod(0o755)
+            config = CodexExecConfig(
+                run_root=root,
+                repo_root=root,
+                codex_home=root / "codex-home",
+                codex_binary=os.fspath(fake),
+                workflow_id="fixture-workflow",
+                authority_revision=1,
+                terminate_grace_seconds=0.1,
+            )
+            observed: dict[str, object] = {}
+
+            def run() -> None:
+                observed.update(
+                    run_read_only_phase(
+                        root,
+                        plan,
+                        codex_task_executor(config),
+                        max_parallel=1,
+                    )
+                )
+
+            thread = threading.Thread(target=run)
+            thread.start()
+            record = root / "runtime" / "processes" / "001-research" / "research-1.json"
+            deadline = time.monotonic() + 3
+            while not record.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(record.exists())
+            cancelled = cancel_run(root, 1, grace_seconds=0.1)
+            self.assertEqual(cancelled["status"], "cancel_requested")
+            self.assertEqual(cancelled["signalled_tasks"], ["research-1"])
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(observed["status"], "cancelled")
+            receipt = json.loads((root / observed["receipt_ref"]).read_text())
+            self.assertEqual(receipt["task_counts"]["cancelled"], 2)
+            self.assertEqual(receipt["terminal_reason"], "phase_cancelled")
+            self.assertTrue(record.is_file())
+
+    def test_cancel_rejects_forged_pgid_before_signalling(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workflow = fixture("workflow.json")
+            create_once_json(root, "workflow.json", workflow)
+            identity = _process_identity(os.getpid())
+            self.assertIsNotNone(identity)
+            create_once_json(
+                root,
+                "runtime/processes/forged.json",
+                {
+                    "workflow_id": workflow["workflow_id"],
+                    "authority_revision": 1,
+                    "task_id": "forged",
+                    "pid": os.getpid(),
+                    "pgid": os.getpid() + 1,
+                    "audit_marker": f"agent-workflow:{workflow['workflow_id']}:forged:fixture",
+                    "process_identity": identity,
+                    "command": ["/fixture/codex"],
+                    "command_sha256": "sha256:" + "1" * 64,
+                },
+            )
+            with mock.patch("workflow_runtime.os.killpg") as killpg:
+                with self.assertRaisesRegex(RuntimeFailure, "ownership proof"):
+                    cancel_run(root, 1)
+                killpg.assert_not_called()
+
+    def test_cancel_rejects_record_without_live_unforgeable_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workflow = fixture("workflow.json")
+            create_once_json(root, "workflow.json", workflow)
+            process = subprocess.Popen(["/bin/sleep", "5"], start_new_session=True)
+            try:
+                identity = _process_identity(process.pid)
+                self.assertIsNotNone(identity)
+                marker = (
+                    f"agent-workflow:{workflow['workflow_id']}:forged-live:fixture"
+                )
+                command = [
+                    "/fixture/codex",
+                    "-c",
+                    f'agent_workflow_audit_marker="{marker}"',
+                ]
+                command_payload = (
+                    json.dumps(command, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    + "\n"
+                ).encode()
+                create_once_json(
+                    root,
+                    "runtime/processes/forged-live.json",
+                    {
+                        "workflow_id": workflow["workflow_id"],
+                        "authority_revision": 1,
+                        "task_id": "forged-live",
+                        "pid": process.pid,
+                        "pgid": process.pid,
+                        "audit_marker": marker,
+                        "process_identity": identity,
+                        "command": command,
+                        "command_sha256": digest(command_payload),
+                    },
+                )
+                with self.assertRaisesRegex(RuntimeFailure, "live marker ownership"):
+                    cancel_run(root, 1)
+                self.assertIsNone(process.poll())
+            finally:
+                process.terminate()
+                process.wait(timeout=3)
+
+    def test_phase_deadline_prevents_queued_launch_and_seals_timeout_event(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=2)
+            plan["phase_budget_seconds"] = 1
+            for task in plan["tasks"]:
+                task["execution_deadline_seconds"] = 1
+            fake = root / "fake-timeout"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import json, signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print(json.dumps({'type': 'thread.started', 'thread_id': 'timeout-worker'}), flush=True)
+while True:
+    time.sleep(0.1)
+"""
+            )
+            fake.chmod(0o755)
+            execute = codex_task_executor(
+                CodexExecConfig(
+                    run_root=root,
+                    repo_root=root,
+                    codex_home=root / "codex-home",
+                    codex_binary=os.fspath(fake),
+                    workflow_id="fixture-workflow",
+                    authority_revision=1,
+                    terminate_grace_seconds=0.1,
+                )
+            )
+            summary = run_read_only_phase(root, plan, execute, max_parallel=1)
+            self.assertEqual(summary["status"], "failed")
+            receipt = json.loads((root / summary["receipt_ref"]).read_text())
+            self.assertEqual(receipt["task_counts"]["timed_out"], 1)
+            self.assertEqual(receipt["task_counts"]["not_started_deadline"], 1)
+            events = (
+                root
+                / "phases/001-research/tasks/research-1/attempts/001/events.jsonl"
+            ).read_text()
+            self.assertIn('"type":"runtime.timeout"', events)
+
+    def test_admission_binds_runtime_baseline_and_capability_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            worker_root = root / "src"
+            worker_root.mkdir()
+            source_codex_home = root / "source-codex-home"
+            workflow = fixture("workflow.json")
+            empty = baseline_gate._packed(b"")
+            baseline = {
+                "schema_version": "agent-workflow.vnext-replayable-baseline.v2",
+                "baseline_kind": "pre_slice",
+                "head": workflow["admission"]["repository"]["head"],
+                "branch": workflow["admission"]["repository"]["branch"],
+                "environment": {
+                    "codex_cli": "codex-cli test",
+                    "platform": "test",
+                    "model": "test-model",
+                    "reasoning_effort": "xhigh",
+                },
+                "selection": {
+                    "tracked_excludes": [],
+                    "untracked_mode": "explicit",
+                    "untracked_paths": [],
+                },
+                "staged_patch": empty,
+                "unstaged_patch": empty,
+                "staged_binary_patch": empty,
+                "unstaged_binary_patch": empty,
+                "untracked": [],
+                "relevant_files": [],
+                "parent_summary": {
+                    "schema_version": "agent-workflow.vnext-pre-slice-baseline.v1",
+                    "summary_sha256": "sha256:" + "1" * 64,
+                    "head": workflow["admission"]["repository"]["head"],
+                    "branch": workflow["admission"]["repository"]["branch"],
+                },
+                "candidate_parent": None,
+                "intended_changes": [],
+                "immutability": "create_once_do_not_rewrite",
+            }
+            baseline["seal_sha256"] = baseline_gate._seal(baseline)
+            baseline_bytes = baseline_gate._canonical(baseline)
+            baseline_path = root / "evidence" / "baseline.json"
+            baseline_path.parent.mkdir(parents=True)
+            baseline_path.write_bytes(baseline_bytes)
+            statuses = {
+                name: "unavailable" if name == "sandbox_isolation" else "pass"
+                for name in workflow["admission"]["capabilities"]
+            }
+            artifacts: dict[str, tuple[str, str]] = {}
+
+            def write_probe(name: str, value: object, kind: str) -> None:
+                path = root / "evidence" / name
+                payload = (
+                    value
+                    if isinstance(value, bytes)
+                    else (json.dumps(value, sort_keys=True) + "\n").encode()
+                )
+                path.write_bytes(payload)
+                artifacts[name] = (kind, digest(payload))
+
+            observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            runner_probe = {
+                "schema_version": "agent-workflow.runner-evidence.vnext.slice1.v2",
+                "runtime_bundle_sha256": _runtime_bundle_sha256(),
+                "execution_scope": {"target_eligible": True},
+                "orchestrator_session": {"session_id": "orchestrator-fixture"},
+                "completion_density": {
+                    "actual_orchestrator_completions": 2,
+                    "forbidden_polling_or_wrapper_wakes": 0,
+                },
+                "security": {
+                    "all_permission_profiles_exact": True,
+                    "all_routes_attested": True,
+                },
+                "p1_repairs": {
+                    "repository_runtime_and_codex_terminal_fence_passed": True,
+                },
+                "parallelism": {"all_tasks_started_at": observed_at},
+            }
+            main_probe = {
+                "schema_version": "agent-workflow.main-delivery-audit.vnext.slice1.v1",
+                "workflow_id": "fixture-source",
+                "main_session": {"session_id": "main-fixture"},
+                "child_session": {"session_id": "orchestrator-fixture"},
+                "delivery": {"matching_child_terminal_callbacks_received": 1},
+            }
+            context_profile = {
+                "type": "managed",
+                "network": "restricted",
+                "file_system": {
+                    "type": "restricted",
+                    "entries": [
+                        {
+                            "path": {
+                                "type": "special",
+                                "value": {"kind": "minimal"},
+                            },
+                            "access": "read",
+                        },
+                        {
+                            "path": {"type": "path", "path": os.fspath(worker_root.resolve())},
+                            "access": "read",
+                        },
+                        {
+                            "path": {
+                                "type": "path",
+                                "path": os.fspath(
+                                    source_codex_home.resolve() / "tmp/arg0/codex-arg0fixture"
+                                ),
+                            },
+                            "access": "read",
+                        },
+                    ],
+                },
+            }
+            write_probe("runner-probe.json", runner_probe, "runner_evidence")
+            write_probe("main-probe.json", main_probe, "main_delivery_audit")
+            write_probe(
+                "worker-context.json",
+                {
+                    "model": "gpt-5.6-terra",
+                    "effort": "xhigh",
+                    "session_id": "worker-session",
+                    "workspace_roots": [os.fspath(worker_root.resolve())],
+                    "sandbox_policy": {"type": "read-only"},
+                    "permission_profile": context_profile,
+                },
+                "turn_context",
+            )
+            write_probe(
+                "top-context.json",
+                {
+                    "model": "gpt-5.6-sol",
+                    "effort": "xhigh",
+                    "session_id": "top-session",
+                    "workspace_roots": [os.fspath(worker_root.resolve())],
+                    "sandbox_policy": {"type": "read-only"},
+                    "permission_profile": context_profile,
+                },
+                "turn_context",
+            )
+            write_probe(
+                "denial-output.json",
+                {"answer": "workspace=read;transient=denied;source=denied"},
+                "typed_output",
+            )
+            test_names = [
+                "test_cancel_rejects_record_without_live_unforgeable_marker",
+                "test_cancel_signals_active_group_and_terminalizes_queued_task",
+                "test_log_drainer_caps_event_object_count_even_within_durable_limit",
+                "test_terminal_fence_runs_after_workers_and_before_results_or_receipt",
+            ]
+            write_probe(
+                "focused-tests.txt",
+                ("\n".join(f"{name} ... ok" for name in test_names) + "\n\nOK\n").encode(),
+                "focused_test_report",
+            )
+            write_probe(
+                "source-codex.json",
+                {
+                    "schema_version": "agent-workflow.slice0b-capability-summary.v2",
+                    "codex_cli_version": "codex-cli fixture",
+                    "codex_binary_sha256": "sha256:" + "2" * 64,
+                },
+                "source_codex_identity",
+            )
+
+            def proof(name: str) -> dict[str, str]:
+                kind, sha256 = artifacts[name]
+                return {
+                    "kind": kind,
+                    "evidence_ref": f"evidence/{name}",
+                    "evidence_sha256": sha256,
+                }
+
+            runner_entry = proof("runner-probe.json")
+            context_entries = [proof("worker-context.json"), proof("top-context.json")]
+            provenance = {
+                "producer": {
+                    "name": "agent-workflow-slice1-probe",
+                    "validator_runtime_bundle_sha256": _runtime_bundle_sha256(),
+                    "source_runtime_bundle_sha256": _runtime_bundle_sha256(),
+                    "codex_cli_version": "codex-cli fixture",
+                    "codex_binary_sha256": "sha256:" + "2" * 64,
+                },
+                "observed_at": observed_at,
+                "source_run": {
+                    "workflow_id": "fixture-source",
+                    "orchestrator_session_id": "orchestrator-fixture",
+                    "main_session_id": "main-fixture",
+                    "codex_home": os.fspath(source_codex_home.resolve()),
+                    "worker_session_ids": ["worker-session"],
+                    "top_session_ids": ["top-session"],
+                },
+                "source_codex_identity": {
+                    "evidence_ref": "evidence/source-codex.json",
+                    "evidence_sha256": artifacts["source-codex.json"][1],
+                },
+                "proof_artifacts": {
+                    "blocking_wait": [runner_entry],
+                    "read_only_containment": [
+                        runner_entry,
+                        *context_entries,
+                        proof("denial-output.json"),
+                    ],
+                    "route_attestation": [runner_entry, *context_entries],
+                    "sandbox_isolation": [runner_entry],
+                    "cancel_reap": [proof("focused-tests.txt")],
+                    "raw_session_audit": [runner_entry, proof("main-probe.json")],
+                    "accounting_evidence": [runner_entry],
+                    "generation_fence": [runner_entry, proof("focused-tests.txt")],
+                },
+            }
+            receipt = capability_receipt(statuses, provenance)
+            receipt_bytes = (json.dumps(receipt, sort_keys=True) + "\n").encode()
+            receipt_path = root / "evidence" / "capability-receipt.json"
+            receipt_path.write_bytes(receipt_bytes)
+            capability = {
+                "schema_version": "agent-workflow.slice0b-capability-summary.v2",
+                "observed_at": "2026-07-12T00:00:00Z",
+                "codex_cli_version": "codex-cli fixture",
+                "codex_binary_sha256": "sha256:" + "2" * 64,
+                "capabilities": {
+                    name: {
+                        "status": status,
+                        "evidence_ref": "evidence/capability-receipt.json",
+                        "evidence_sha256": digest(receipt_bytes),
+                    }
+                    for name, status in statuses.items()
+                },
+            }
+            capability_bytes = (json.dumps(capability, sort_keys=True) + "\n").encode()
+            capability_path = root / "evidence" / "capabilities.json"
+            capability_path.write_bytes(capability_bytes)
+            workflow["baseline_ref"] = "evidence/baseline.json"
+            workflow["baseline_sha256"] = digest(baseline_bytes)
+            workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            workflow["runtime_bundle"]["sha256"] = _runtime_bundle_sha256()
+            for value in workflow["admission"]["capabilities"].values():
+                value["evidence_ref"] = "evidence/capabilities.json"
+                value["evidence_sha256"] = digest(capability_bytes)
+            _validate_admission_inputs(root, workflow)
+            prefix_drift = deepcopy(capability)
+            prefix_drift["capabilities"]["cancel_reap"]["status"] = (
+                "pass_with_missing_terminal"
+            )
+            prefix_bytes = (json.dumps(prefix_drift, sort_keys=True) + "\n").encode()
+            capability_path.write_bytes(prefix_bytes)
+            for value in workflow["admission"]["capabilities"].values():
+                value["evidence_sha256"] = digest(prefix_bytes)
+            with self.assertRaisesRegex(RuntimeFailure, "contradicts declared status"):
+                _validate_admission_inputs(root, workflow)
+            capability_path.write_bytes(capability_bytes)
+            for value in workflow["admission"]["capabilities"].values():
+                value["evidence_sha256"] = digest(capability_bytes)
+            incomplete_receipt = deepcopy(receipt)
+            incomplete_receipt["blocking_transport"]["outer_yield_ms"] = 10000
+            incomplete_bytes = (json.dumps(incomplete_receipt, sort_keys=True) + "\n").encode()
+            receipt_path.write_bytes(incomplete_bytes)
+            for item in capability["capabilities"].values():
+                item["evidence_sha256"] = digest(incomplete_bytes)
+            incomplete_capability_bytes = (
+                json.dumps(capability, sort_keys=True) + "\n"
+            ).encode()
+            capability_path.write_bytes(incomplete_capability_bytes)
+            for value in workflow["admission"]["capabilities"].values():
+                value["evidence_sha256"] = digest(incomplete_capability_bytes)
+            with self.assertRaisesRegex(RuntimeFailure, "blocking transport probe"):
+                _validate_admission_inputs(root, workflow)
+            receipt_path.write_bytes(receipt_bytes)
+            capability_path.write_bytes(capability_bytes)
+            for value in workflow["admission"]["capabilities"].values():
+                value["evidence_sha256"] = digest(capability_bytes)
+            capability_path.write_text("{}\n")
+            with self.assertRaisesRegex(RuntimeFailure, "capability evidence"):
+                _validate_admission_inputs(root, workflow)
+
+    def test_source_write_capability_requires_profile_context_and_observed_denials(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            workspace = root / "probe-workspace"
+            codex_home = root / "probe-codex-home"
+            (workspace / "src/api").mkdir(parents=True)
+            (codex_home / "tmp/arg0/codex-arg0fixture").mkdir(parents=True)
+            profile = writer_profile_bytes(("src/api",))
+            profile_path = root / "evidence/writer-profile.toml"
+            profile_path.parent.mkdir()
+            profile_path.write_bytes(profile)
+            context = {
+                "model": "gpt-5.6-terra",
+                "effort": "xhigh",
+                "session_id": "writer-session",
+                "workspace_roots": [os.fspath(workspace)],
+                "permission_profile": {
+                    "type": "managed",
+                    "network": "restricted",
+                    "file_system": {
+                        "type": "restricted",
+                        "entries": [
+                            {"path": {"type": "special", "value": {"kind": "minimal"}}, "access": "read"},
+                            {"path": {"type": "path", "path": os.fspath(workspace)}, "access": "read"},
+                            {"path": {"type": "path", "path": os.fspath(workspace / "src/api")}, "access": "write"},
+                            {"path": {"type": "path", "path": os.fspath(codex_home / "tmp/arg0/codex-arg0fixture")}, "access": "read"},
+                        ],
+                    },
+                },
+            }
+            context_payload = (json.dumps(context, sort_keys=True) + "\n").encode()
+            context_path = root / "evidence/writer-context.json"
+            context_path.write_bytes(context_payload)
+            request = {
+                "command": ["codex", "exec", "-p", "vnext-writer"],
+                "cwd": os.fspath(workspace),
+                "environment": {"CODEX_HOME": os.fspath(codex_home)},
+            }
+            request_payload = (json.dumps(request, sort_keys=True) + "\n").encode()
+            (root / "evidence/supervisor-request.json").write_bytes(request_payload)
+            events_payload = b'{"type":"turn.completed"}\n'
+            stderr_payload = b""
+            (root / "evidence/supervisor-events.jsonl").write_bytes(events_payload)
+            (root / "evidence/supervisor-stderr.log").write_bytes(stderr_payload)
+            terminal = {
+                "status": "completed",
+                "request_sha256": digest(request_payload),
+                "stdout_sha256": digest(events_payload),
+                "stderr_sha256": digest(stderr_payload),
+            }
+            terminal_payload = (json.dumps(terminal, sort_keys=True) + "\n").encode()
+            (root / "evidence/supervisor-terminal.json").write_bytes(terminal_payload)
+            sandbox_command = ["codex", "sandbox", "-P", "vnext_writer", "/bin/true"]
+            sandbox_stdout = b"allowed=0 git=1 sibling=1 control=1 credential=1 network=1\n"
+            sandbox_stderr = b""
+            (root / "evidence/sandbox.stdout").write_bytes(sandbox_stdout)
+            (root / "evidence/sandbox.stderr").write_bytes(sandbox_stderr)
+            report = {
+                "schema_version": "agent-workflow.source-write-denial-probe.vnext.v1",
+                "profile_sha256": digest(profile),
+                "workspace_root": os.fspath(workspace),
+                "command": sandbox_command,
+                "command_sha256": digest(
+                    (json.dumps(sandbox_command, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                ),
+                "stdout_ref": "evidence/sandbox.stdout",
+                "stdout_sha256": digest(sandbox_stdout),
+                "stderr_ref": "evidence/sandbox.stderr",
+                "stderr_sha256": digest(sandbox_stderr),
+                "allowed_write_exit": 0,
+                "git_write_exit": 1,
+                "sibling_write_exit": 1,
+                "control_read_exit": 1,
+                "credential_read_exit": 1,
+                "network_exit": 6,
+            }
+            report_payload = (json.dumps(report, sort_keys=True) + "\n").encode()
+            report_path = root / "evidence/writer-denials.json"
+            report_path.write_bytes(report_payload)
+            evidence = {
+                "schema_version": "agent-workflow.source-write-capability.vnext.v1",
+                "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "producer": {
+                    "name": "agent-workflow-slice3-writer-probe",
+                    "runtime_bundle_sha256": _runtime_bundle_sha256(),
+                    "codex_cli_version": "fixture-cli",
+                    "codex_binary_sha256": "sha256:" + "9" * 64,
+                },
+                "workspace": {
+                    "root": os.fspath(workspace),
+                    "codex_home": os.fspath(codex_home),
+                    "write_roots": ["src/api"],
+                    "profile_ref": "evidence/writer-profile.toml",
+                    "profile_sha256": digest(profile),
+                    "turn_context_ref": "evidence/writer-context.json",
+                    "turn_context_sha256": digest(context_payload),
+                },
+                "session": {
+                    "id": "writer-session",
+                    "model": "gpt-5.6-terra",
+                    "reasoning_effort": "xhigh",
+                },
+                "supervisor": {
+                    "request_ref": "evidence/supervisor-request.json",
+                    "request_sha256": digest(request_payload),
+                    "terminal_ref": "evidence/supervisor-terminal.json",
+                    "terminal_sha256": digest(terminal_payload),
+                    "events_ref": "evidence/supervisor-events.jsonl",
+                    "events_sha256": digest(events_payload),
+                    "stderr_ref": "evidence/supervisor-stderr.log",
+                    "stderr_sha256": digest(stderr_payload),
+                },
+                "deterministic_probe": {
+                    "evidence_ref": "evidence/writer-denials.json",
+                    "evidence_sha256": digest(report_payload),
+                },
+                "environment": {
+                    "inherit": ["AGENT_WORKFLOW_AUDIT_MARKER", "CODEX_HOME", "HOME", "LANG", "PATH", "TMPDIR"],
+                    "plugins_disabled": True,
+                    "mcp_disabled": True,
+                    "network_enabled": False,
+                },
+            }
+            evidence_payload = (json.dumps(evidence, sort_keys=True) + "\n").encode()
+            evidence_path = root / "evidence/source-write-capability.json"
+            evidence_path.write_bytes(evidence_payload)
+            capability = {
+                "status": "pass",
+                "evidence_ref": "evidence/source-write-capability.json",
+                "evidence_sha256": digest(evidence_payload),
+            }
+            with mock.patch("workflow_runtime.validate_supervisor_receipt"):
+                _validate_source_write_capability(
+                    root,
+                    capability,
+                    running_bundle=_runtime_bundle_sha256(),
+                    codex_sha256="sha256:" + "9" * 64,
+                    codex_version="fixture-cli",
+                )
+            context["permission_profile"]["file_system"]["entries"].append(
+                {"path": {"type": "path", "path": os.fspath(root / "escape")}, "access": "write"}
+            )
+            drifted = (json.dumps(context, sort_keys=True) + "\n").encode()
+            context_path.write_bytes(drifted)
+            evidence["workspace"]["turn_context_sha256"] = digest(drifted)
+            drifted_evidence = (json.dumps(evidence, sort_keys=True) + "\n").encode()
+            evidence_path.write_bytes(drifted_evidence)
+            capability["evidence_sha256"] = digest(drifted_evidence)
+            with mock.patch("workflow_runtime.validate_supervisor_receipt"):
+                with self.assertRaisesRegex(RuntimeFailure, "effective permission"):
+                    _validate_source_write_capability(
+                        root,
+                        capability,
+                        running_bundle=_runtime_bundle_sha256(),
+                        codex_sha256="sha256:" + "9" * 64,
+                        codex_version="fixture-cli",
+                    )
+
+    def test_external_log_flood_is_drained_and_capped(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            schema = root / "schemas" / "worker-output.json"
+            schema.parent.mkdir()
+            schema.write_text('{"type":"object"}\n')
+            fake = root / "fake-flood"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import sys
+sys.stdout.write('x' * 200000)
+"""
+            )
+            fake.chmod(0o755)
+            observed = codex_task_executor(
+                CodexExecConfig(
+                    run_root=root,
+                    repo_root=root,
+                    codex_home=root / "codex-home",
+                    codex_binary=os.fspath(fake),
+                    log_limit_bytes=1024,
+                )
+            )(
+                {
+                    "task_id": "flood",
+                    "role": "worker",
+                    "execution_deadline_seconds": 5,
+                    **self.direct_runtime_fence(root),
+                },
+                {"output_schema_ref": "schemas/worker-output.json", "prompt": "bounded"},
+            )
+            self.assertTrue(observed.log_limit_exceeded)
+            self.assertLess(len(observed.stdout_bytes or b""), 2048)
+            self.assertTrue(
+                any(event.get("type") == "runtime.log_limit_exceeded" for event in observed.events)
+            )
+
+    def test_parallel_waves_obey_one_two_and_four_capacity(self) -> None:
+        for capacity in (1, 2, 4):
+            with self.subTest(capacity=capacity), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                plan = self.build_run(root, task_count=4)
+                active = 0
+                maximum = 0
+                lock = threading.Lock()
+
+                def execute(task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                    nonlocal active, maximum
+                    with lock:
+                        active += 1
+                        maximum = max(maximum, active)
+                    time.sleep(0.03)
+                    with lock:
+                        active -= 1
+                    model = "gpt-5.6-terra" if task["role"] == "worker" else "gpt-5.6-sol"
+                    session = f"wave-{task['task_id']}"
+                    return RawExecution(
+                        exit_code=0,
+                        events=[
+                            {"type": "thread.started", "thread_id": session},
+                            {
+                                "type": "item.completed",
+                                "item": {"type": "agent_message", "text": '{"answer":"ok"}'},
+                            },
+                            {
+                                "type": "turn.completed",
+                                "usage": {"input_tokens": 1, "output_tokens": 1},
+                            },
+                        ],
+                        stderr="",
+                        turn_context={"model": model, "effort": "xhigh", "session_id": session},
+                    )
+
+                summary = run_read_only_phase(root, plan, execute, max_parallel=capacity)
+                self.assertEqual(summary["status"], "completed")
+                self.assertEqual(maximum, capacity)
+
+    def test_runtime_uses_least_privilege_profile_and_transient_auth_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            auth = root / "source-auth.json"
+            auth.write_text('{"tokens":{"access_token":"fixture-access"}}\n')
+            codex_home = _prepare_codex_home(root, auth)
+            target = codex_home / "auth.json"
+            self.assertTrue(target.is_file())
+            self.assertEqual(target.stat().st_mode & 0o077, 0)
+            profile = (codex_home / "vnext-read-only.config.toml").read_text()
+            self.assertIn('":minimal" = "read"', profile)
+            self.assertNotIn('extends = ":read-only"', profile)
+            _cleanup_codex_auth(codex_home)
+            self.assertFalse(target.exists())
+            owned = _prepare_codex_home(root, auth, owner_id="generation-001-owner")
+            self.assertEqual(
+                owned,
+                root.resolve() / "runtime/codex-homes/generation-001-owner",
+            )
+            self.assertTrue((owned / "vnext-read-only.config.toml").is_file())
+            self.assertTrue((owned / "auth.json").is_file())
+            _cleanup_codex_auth(owned)
+
+    def test_recovery_executor_uses_pinned_app_server_resume_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            resume_session = "019f566c-4899-7d03-83a5-3e7043b74fcc"
+            auth = root / "source-auth.json"
+            auth.write_text('{"tokens":{"access_token":"fixture-access"}}\n')
+            codex_home = _prepare_codex_home(
+                root,
+                auth,
+                owner_id="failed-lineage-home",
+            )
+            schema = root / "schemas/worker-output.json"
+            schema.parent.mkdir()
+            schema.write_text(
+                '{"type":"object","additionalProperties":false,'
+                '"required":["answer"],"properties":{"answer":{"type":"string"}}}\n'
+            )
+            _seal_runtime_bundle(root)
+            session = codex_home / "sessions/recovery.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(json.dumps({"type": "session_meta", "payload": {"id": resume_session}}) + "\n")
+            prior_rollout_sha256 = digest(session.read_bytes())
+            prior_rollout_size = session.stat().st_size
+            fake = root / "fake-codex"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import json, os, pathlib, sys
+thread_id = '019f566c-4899-7d03-83a5-3e7043b74fcc'
+session = pathlib.Path(os.environ['CODEX_HOME']) / 'sessions' / 'recovery.jsonl'
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get('method')
+    if method == 'initialize':
+        print(json.dumps({'id': request['id'], 'result': {}}), flush=True)
+    elif method == 'thread/resume':
+        print(json.dumps({'id': request['id'], 'result': {'thread': {'id': thread_id}}}), flush=True)
+    elif method == 'turn/start':
+        params = request['params']
+        turn_id = '019f5691-1e66-77f1-93c8-3fb7dab0218c'
+        context = {
+            'turn_id': turn_id,
+            'cwd': params['cwd'],
+            'model': params['model'],
+            'effort': params['effort'],
+            'workspace_roots': params['runtimeWorkspaceRoots'],
+            'sandbox_policy': {'type': 'read-only'},
+            'permission_profile': {
+                'type': 'managed',
+                'file_system': {'type': 'restricted', 'entries': [
+                    {'path': {'type': 'special', 'value': {'kind': 'minimal'}}, 'access': 'read'},
+                    {'path': {'type': 'path', 'path': params['cwd']}, 'access': 'read'},
+                    {'path': {'type': 'path', 'path': str(pathlib.Path(os.environ['CODEX_HOME']) / 'tmp' / 'arg0' / 'codex-arg0fixture')}, 'access': 'read'},
+                ]},
+                'network': 'restricted',
+            },
+        }
+        appended = [
+            {'type': 'turn_context', 'payload': context},
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': params['input'][0]['text']}]}},
+            {'type': 'event_msg', 'payload': {'type': 'token_count', 'info': {'last_token_usage': {'input_tokens': 7, 'output_tokens': 3}}}},
+            {'type': 'event_msg', 'payload': {'type': 'task_complete', 'turn_id': turn_id, 'last_agent_message': '{\\\"answer\\\":\\\"recovered\\\"}'}},
+        ]
+        with session.open('a') as target:
+            target.write(''.join(json.dumps(item) + '\\n' for item in appended))
+        print(json.dumps({'id': request['id'], 'result': {'turn': {'id': turn_id}}}), flush=True)
+        print(json.dumps({'method': 'turn/completed', 'params': {'turn': {'id': turn_id, 'status': 'completed'}}}), flush=True)
+"""
+            )
+            fake.chmod(0o755)
+            plan_path = create_once_json(root, "phases/001-unknown/plan.json", {"kind": "recovery-plan"})
+            failed_path = create_once_json(root, "phases/001-failed/tasks/failed/result.json", {"kind": "failed-result"})
+            causal_path = create_once_json(root, "phases/001-failed/receipt.json", {"kind": "causal-receipt"})
+            runtime_fence = self.direct_runtime_fence(root)
+            runtime_fence["_runtime_plan_sha256"] = digest(plan_path.read_bytes())
+            observed = codex_task_executor(
+                CodexExecConfig(
+                    run_root=root,
+                    repo_root=root,
+                    codex_home=codex_home,
+                    codex_binary=os.fspath(fake),
+                )
+            )(
+                {
+                    "task_id": "recovery-task",
+                    "lineage_id": "lineage-recovery",
+                    "role": "worker",
+                    "work_mode": "read",
+                    "write_roots": [],
+                    "execution_deadline_seconds": 5,
+                    "_runtime_resume_binding": {
+                        "failed_result_ref": "phases/001-failed/tasks/failed/result.json",
+                        "failed_result_sha256": digest(failed_path.read_bytes()),
+                        "causal_receipt_ref": "phases/001-failed/receipt.json",
+                        "causal_receipt_sha256": digest(causal_path.read_bytes()),
+                        "session_id": resume_session,
+                        "codex_home": os.fspath(codex_home),
+                        "session_rollout_path": os.fspath(session),
+                        "prior_rollout_sha256": prior_rollout_sha256,
+                        "prior_rollout_size": prior_rollout_size,
+                    },
+                    **runtime_fence,
+                },
+                {"output_schema_ref": "schemas/worker-output.json", "prompt": "recover exact failure"},
+            )
+            self.assertEqual(observed.exit_code, 0)
+            request = json.loads(
+                (root / "runtime/watchdogs/001-unknown/recovery-task/request.json").read_text()
+            )
+            command = request["command"]
+            adapter = root / "runtime-bundle/app_resume_adapter.py"
+            self.assertEqual(command[:2], [os.fspath(Path(sys.executable).resolve()), os.fspath(adapter)])
+            self.assertEqual(request["transport_executable_sha256"], digest(Path(sys.executable).resolve().read_bytes()))
+            self.assertEqual(request["transport_adapter_sha256"], digest(adapter.read_bytes()))
+            self.assertEqual(request["codex_binary"], os.fspath(fake))
+            self.assertEqual(command[2:4], ["--spec", os.fspath(root / "runtime/resume/001-unknown/recovery-task/spec.json")])
+            self.assertIn("--codex", command)
+            self.assertEqual(command[command.index("--codex") + 1], os.fspath(fake))
+            self.assertNotIn("exec", command)
+            self.assertNotIn("resume", command)
+            self.assertTrue((codex_home / "config.toml").is_file())
+            receipt_ref = "runtime/watchdogs/001-unknown/recovery-task/terminal.json"
+            receipt_path = root / receipt_ref
+            receipt = json.loads(receipt_path.read_text())
+            receipt.update({
+                "producer": "reconciler",
+                "status": "failed",
+                "exit_code": None,
+                "group_reaped": False,
+                "group_gone_observed": True,
+                "reconcile_reason": "watchdog_lost",
+            })
+            receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
+            replayed = _raw_from_supervisor_terminal(
+                root,
+                "runtime/watchdogs/001-unknown/recovery-task/request.json",
+                receipt_ref,
+            )
+            self.assertEqual(replayed.exit_code, 0)
+            self.assertFalse(replayed.adapter_error)
+            self.assertTrue(any(event.get("type") == "turn.completed" for event in replayed.events))
+
+            resume_terminal_path = root / "runtime/resume/001-unknown/recovery-task/terminal.json"
+            resume_terminal = json.loads(resume_terminal_path.read_text())
+            resume_terminal["events"][-1]["usage"]["input_tokens"] = 999
+            resume_terminal_path.write_text(json.dumps(resume_terminal, sort_keys=True, separators=(",", ":")) + "\n")
+            with self.assertRaisesRegex(RuntimeFailure, "differs from raw projection"):
+                _raw_from_supervisor_terminal(
+                    root,
+                    "runtime/watchdogs/001-unknown/recovery-task/request.json",
+                    receipt_ref,
+                )
+            resume_terminal["events"][-1]["usage"]["input_tokens"] = 7
+            resume_terminal_path.write_text(json.dumps(resume_terminal, sort_keys=True, separators=(",", ":")) + "\n")
+
+            request_path = root / "runtime/watchdogs/001-unknown/recovery-task/request.json"
+            request["work_mode"] = "write"
+            request["write_roots"] = ["src/api"]
+            request_path.write_text(json.dumps(request, sort_keys=True, separators=(",", ":")) + "\n")
+            receipt["request_sha256"] = digest(request_path.read_bytes())
+            receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
+            with (
+                mock.patch("workflow_runtime.attest_writer_permissions", return_value=None) as writer_attest,
+                mock.patch("workflow_runtime._attest_worker_permissions") as reader_attest,
+            ):
+                writer_replayed = _raw_from_supervisor_terminal(
+                    root,
+                    "runtime/watchdogs/001-unknown/recovery-task/request.json",
+                    receipt_ref,
+                )
+            self.assertEqual(writer_replayed.exit_code, 0)
+            writer_attest.assert_called_once()
+            reader_attest.assert_not_called()
+
+    @unittest.skipUnless(
+        os.environ.get("RUN_LIVE_CODEX_WRITER") == "1" and shutil.which("codex"),
+        "set RUN_LIVE_CODEX_WRITER=1 for the real routed writer smoke",
+    )
+    def test_live_codex_writer_profile_is_effective_and_attested(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            workspace = root / "isolated-checkout"
+            (workspace / "src/api").mkdir(parents=True)
+            (workspace / ".git").mkdir()
+            schema = root / "schemas/writer-output.json"
+            schema.parent.mkdir()
+            schema.write_text(
+                json.dumps(
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["answer"],
+                        "properties": {"answer": {"type": "string", "const": "ok"}},
+                    }
+                )
+            )
+            auth_source = Path.home() / ".codex/auth.json"
+            self.assertTrue(auth_source.is_file(), "live writer smoke requires ~/.codex/auth.json")
+            codex_home = _prepare_codex_home(
+                root,
+                auth_source,
+                owner_id="live-writer-smoke",
+                writer_roots=("src/api",),
+            )
+            try:
+                execute = codex_task_executor(
+                    CodexExecConfig(
+                        run_root=root,
+                        repo_root=workspace,
+                        codex_home=codex_home,
+                        codex_binary=shutil.which("codex") or "codex",
+                        workflow_id="live-writer-smoke",
+                        authority_revision=1,
+                        permissions_profile="vnext-writer",
+                    )
+                )
+                observed = execute(
+                    {
+                        **self.direct_runtime_fence(root),
+                        "task_id": "writer-smoke",
+                        "role": "worker",
+                        "work_mode": "write",
+                        "write_roots": ["src/api"],
+                        "execution_deadline_seconds": 120,
+                        "_runtime_worker_root": os.fspath(workspace),
+                        "_runtime_codex_home": os.fspath(codex_home),
+                        "_runtime_permissions_profile": "vnext-writer",
+                        "_runtime_write_roots": ["src/api"],
+                    },
+                    {
+                        "output_schema_ref": "schemas/writer-output.json",
+                        "prompt": (
+                            "Use the shell once to write the exact UTF-8 text 'live-writer-ok\\n' "
+                            "to src/api/live-writer.txt. Do not inspect or modify anything else. "
+                            "Then return exactly the schema-compliant JSON answer ok."
+                        ),
+                    },
+                )
+                self.assertFalse(observed.adapter_error, observed.stderr)
+                self.assertEqual((workspace / "src/api/live-writer.txt").read_text(), "live-writer-ok\n")
+                self.assertIsNone(
+                    attest_writer_permissions(
+                        observed.turn_context,
+                        workspace,
+                        codex_home,
+                        ("src/api",),
+                    )
+                )
+            finally:
+                _cleanup_codex_auth(codex_home)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -74,7 +74,7 @@ wrapper: run a script and persist its command/result evidence instead.
 
 ## Routed Lane Context
 
-Model routing defaults on for new `codex_builtin_subagents` workflows; legacy workspaces, manual simulation, Claude Code, and explicit rollback remain unrouted. For an enabled routed workflow, the lead must record a fresh capability recheck bound to the inventory snapshot, replace every scaffold `draft` with a complete planned decision, bind required verifier and author lanes, and pass `verify_workflow.py --mode planned` before dispatch.
+Model routing is mandatory for new `codex_builtin_subagents` workflows; genuine `agent-loops.orchestration.v1` workspaces, manual simulation, and Claude Code remain unchanged. The Lead must bind capability schema v3 to an actual native spawn surface with selectable `model` and `thinking`, record a fresh capability recheck, replace every scaffold `draft` with a complete planned decision, bind required verifier and author lanes, and pass `verify_workflow.py --mode planned` before dispatch. Final validation must also replay raw spawns and match normalized lane `task_name`, the current ordered attempt model, inherited effort, and the child session's actual route.
 
 Pass routed lanes this compact context when it affects their work:
 

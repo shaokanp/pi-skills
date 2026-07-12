@@ -14,6 +14,24 @@ explicitly bounded `bounded_interim` path, or fail closed before spawn. Without
 native authority, the Lead can only run an explicitly labeled sequential
 simulation and must not claim that subagents ran.
 
+## Agent Workflow vNext candidate
+
+vNext starts only when the user explicitly requests Agent Workflow. Main creates
+one clean Orchestrator, which plans dynamic phases from a sealed brief while the
+deterministic runtime coordinates external routed workers. Those workers produce
+auditable routing, result, and receipt artifacts, but they are not the Codex native sub-agent tree
+and therefore do not appear in the native sub-agent hierarchy.
+
+The `.workflow/<slug>/` file `view.json` is a derived human and UI projection. Immutable,
+digest-bound artifacts remain authoritative. See the
+[vNext runtime reference](./references/vnext-runtime-reference.md) for mechanics.
+
+**Legacy/native 0.x boundary**: the lanes, rounds, Swarm Card, workspace tree,
+Runner Modes, and native runtime protections below describe pre-cutover 0.x. The
+vNext external runner launches routed workers; legacy scripts do not spawn agents.
+vNext does not use the legacy Swarm Card; its only guaranteed UI is `view.json`
+rebuilt from artifacts.
+
 ## When To Use It
 
 Use Agent Workflow when:
@@ -123,6 +141,7 @@ Repair round:         repair -> verify
 
 ## Swarm Card
 
+This section applies only to legacy/native 0.x; vNext does not use the legacy Swarm Card.
 The Swarm Card is an event-driven status surface shown by the Lead Agent. It
 uses a Markdown left rail instead of a fixed-width ASCII box, so mixed-width
 English, Chinese, symbols, and font fallbacks do not break the layout.
@@ -188,7 +207,9 @@ actually ran.
 
 ## Persistent Workflow Workspace
 
-For multi-round work, collaboration, or resumable state, the Lead Agent creates:
+The following tree is the legacy/native 0.x format; vNext uses immutable Phase/Task
+artifacts and derived `view.json`. For multi-round work, collaboration, or resumable
+state, the legacy Lead Agent creates:
 
 ```text
 .workflow/<slug>/
@@ -215,6 +236,9 @@ orchestration, integration, and final report documents.
 
 ## Runner Modes
 
+This section describes legacy/native 0.x only. The vNext external runner launches routed workers;
+legacy scripts do not spawn agents.
+
 | Mode | Behavior |
 | --- | --- |
 | `codex_builtin_subagents` | A Codex Lead uses the native multi-agent tools |
@@ -222,10 +246,12 @@ orchestration, integration, and final report documents.
 | `manual_simulation` | The Lead simulates lanes sequentially and explicitly states that no subagent ran |
 
 Codex does not shell out to Claude Code, and Claude Code does not shell out to
-Codex. Scripts handle scaffolding, digests, receipts, rendering, and validation;
+Codex. Legacy scripts handle scaffolding, digests, receipts, rendering, and validation;
 they do not spawn agents.
 
 ## Runtime Protections and Optional Hardening
+
+The protections and modes below describe legacy/native 0.x, not the vNext external runner contract.
 
 - **Execution efficiency (native default)**: Codex and Claude Code native workflows
   automatically use isolated lane context, digest-bound dispatch, notification-first
@@ -241,12 +267,14 @@ they do not spawn agents.
   render, validate, and exact-accounting housekeeping into typed receipts. It
   does not spawn, join, queue, or rotate native agents and does not claim host
   atomicity.
-- **Codex model routing v2 (native default)**: new Codex native workflows enable
+- **Codex model routing v2 (native mandatory)**: every new Codex native workflow enables
   routing automatically. Sol handles planning, judgment, review, challenge,
   verification, and high-risk work; Terra handles bounded execution. Missing
-  trusted host capabilities or session reasoning effort fails closed; `off` is
-  only an explicit rollback. The user's session reasoning effort is inherited
-  across the workflow, and the router never changes effort per lane.
+  host `model`/`thinking` control or runtime session evidence fails closed before
+  dispatch and cannot be bypassed with `off`. The Lead derives capabilities from
+  the host tool schema, the current Codex effort is inherited automatically, and
+  raw replay binds each spawn to its ordered attempt and verifies the child
+  session's actual model and effort.
 - **Exact token accounting**: computes Lead and registered-attempt usage from
   native runtime session events and stores Lead-recorded provenance bound to the
   event evidence. Missing evidence fails closed instead of being replaced by an

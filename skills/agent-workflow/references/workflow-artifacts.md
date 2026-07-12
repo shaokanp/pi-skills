@@ -379,7 +379,7 @@ Machine-readable plan compiled by the orchestrator before the round starts:
 
 ```json
 {
-  "schema_version": "agent-loops.orchestration.v1",
+  "schema_version": "agent-loops.orchestration.v2",
   "workflow": {
     "title": "Example workflow",
     "slug": "example-workflow",
@@ -470,10 +470,9 @@ For `custom`, the lane object must define:
 
 New `codex_builtin_subagents` workspaces with native execution efficiency add an
 orthogonal `clean_orchestrator_runtime` block. Its activation is
-`native_default`; model routing is a separate contract that also defaults on for
-new Codex native scaffolds. Existing workspaces, manual simulation, Claude Code,
-and explicit execution-efficiency or model-routing rollback keep their prior
-compatibility paths.
+`native_default`; model routing is a separate mandatory contract for every new
+Codex native scaffold. Existing workspaces, manual simulation, Claude Code, and
+explicit execution-efficiency rollback keep their prior compatibility paths.
 
 The default topology is:
 
@@ -743,8 +742,9 @@ fault injection tests prove a failed operation never mutates the original
 pending ledger or leaves an unrecoverable `token-usage.status=complete` state.
 
 `runtime-harness.json` supplies only the declared default round and honest host
-boundary labels. `runtime-observations.json` is rebuilt from raw runtime events
-and binds a sealed JSONL prefix hash plus the token-evidence digest. Final mode
+boundary labels. New `runtime-observations.v2` artifacts are rebuilt from raw
+runtime events and bind sealed Lead plus routed-child JSONL prefix hashes and the
+token-evidence digest; existing v1 observations remain readable. Final mode
 reopens that prefix and rejects drift between the raw replay and
 `runner-evidence.json.completion_density`; artifact totals or classifications
 cannot override raw truth. Deterministic fixtures under
@@ -1000,29 +1000,38 @@ same record. Final runtime evidence must cover every recorded agent identity as
 terminal, not merely as a wait target.
 
 Scaffold with `--execution-efficiency off`, or disable/remove this block, only
-when an explicit compatibility rollback to prior v1 behavior is required. No
+on non-Codex compatibility paths. New Codex native scaffolds reject that flag
+because mandatory model routing requires raw child-runtime attestation. No
 artifact migration is required, and existing `explicit_opt_in` policies remain
 valid for already-created workspaces.
 
 ## Default Model Routing Artifacts
 
-Routing is enabled by default for new `codex_builtin_subagents` scaffolds and remains inactive for manual simulation and Claude Code runners. Inside a workspace it is active only when `orchestration.model_routing.enabled` is exactly `true`; missing or disabled routing remains valid for existing workspaces and explicit `--model-routing off` compatibility rollbacks. Responsibility routing uses policy, capability, and decision schema v2.
-Already-dispatched v1 routed workspaces are never reinterpreted as v2. Resume them with their pinned skill snapshot or create a new v2 round plan before dispatching new attempts. A v1 capability inventory may be supplied to the new scaffold; its obsolete `automatic_efforts` fields are discarded because effort now comes from the user session.
+Routing is mandatory for new `codex_builtin_subagents` scaffolds and remains inactive for manual simulation and Claude Code runners. New Codex workspaces use `agent-loops.orchestration.v2`; that schema plus the Codex runner makes the exact `orchestration.model_routing_requirement` and enabled routing block mandatory, so deleting the marker does not turn a new workspace into legacy. `--model-routing off` remains parseable for unrelated runners but is rejected for Codex. Genuine `agent-loops.orchestration.v1` workspaces remain readable without migration. Responsibility routing uses policy/decision schema v2 and capability schema v3.
+Already-dispatched v1 routed workspaces are never reinterpreted as v2. Resume them with their pinned skill snapshot or create a new v2 round plan before dispatching new attempts. Legacy v2 capability snapshots remain readable inside existing explicit-opt-in workspaces, but every new mandatory scaffold requires v3 dispatch-control evidence. Obsolete `automatic_efforts` fields are discarded because effort now comes from the runtime session.
 
-Scaffold with the required host capability and session-effort inputs; no routing enable flag is needed:
+The Lead inspects the current native spawn tool schema and writes the capability input automatically. It must attest that `model` and `thinking` are selectable; a supplied filename is not sufficient evidence. The scaffold resolves reasoning effort from the current Codex `turn_context`, so no routing or effort selection flag is needed:
 
 ```bash
 python3 scripts/new_workflow.py "Routed workflow" \
   --runner-mode codex_builtin_subagents \
   --runtime-capabilities /path/to/capabilities.json \
-  --reasoning-effort xhigh \
   --lanes discover,implement,verify
 ```
 
-The scaffold writes `routing-policy.json` and `runtime-capabilities.json`, then references both from `orchestration.model_routing`:
+`--runtime-session-log /path/to/session.jsonl` is optional and must resolve to the same canonical current-thread file found from `CODEX_HOME` plus `CODEX_THREAD_ID`; a different path is rejected even if it forges the same session id. Foreign or fabricated session logs therefore fail before workspace creation. `--reasoning-effort xhigh` may be supplied as an assertion, but a mismatch with the runtime session likewise fails.
+
+The scaffold writes `routing-policy.json` and `runtime-capabilities.json`, then persists the mandatory contract and references both snapshots from `orchestration.model_routing`:
 
 ```json
 {
+  "model_routing_requirement": {
+    "mode": "mandatory_native",
+    "fallback": "fail_closed",
+    "effort_source": "runtime_turn_context",
+    "actual_dispatch_evidence": "child_runtime_attested"
+  },
+  "model_routing": {
   "enabled": true,
   "activation": "native_default",
   "adapter": "codex_builtin_subagents",
@@ -1041,13 +1050,26 @@ The scaffold writes `routing-policy.json` and `runtime-capabilities.json`, then 
     "value": "xhigh",
     "locked": true
   },
+  "session_profile": {
+    "schema_version": "agent-workflow.routing-session-profile.v1",
+    "runtime": "codex",
+    "session_id": "...",
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "xhigh",
+    "source": "runtime_turn_context",
+    "event_line": 123,
+    "event_sha256": "sha256:...",
+    "prefix_sha256": "sha256:...",
+    "observed_at": "2026-07-11T00:00:00Z"
+  },
   "dispatch_gate": "python3 scripts/verify_workflow.py <workflow-dir> --mode planned"
+  }
 }
 ```
 
 Snapshot digests use canonical UTF-8 JSON with sorted keys, compact separators, `ensure_ascii=false`, and the root `content_sha256` field omitted. Snapshot IDs and digests are copied into every decision. A digest mismatch fails closed. The registered v2 policy also has a pinned semantic fingerprint: changing `policy_id`, `policy_version`, or deleting required decision/verifier protections fails even when the edited snapshot has a freshly recomputed content digest.
 
-`runtime-capabilities.json` must use a valid timezone-aware RFC3339 `observed_at`. The scaffold adds one locked `reasoning_effort` with `source: user_session`; every model must advertise that effort in `supported_efforts` before it can run. Supplying the inventory does not certify current availability or the native runner surface. Before `--mode planned`, `runner_adapter.capability_evidence` must be an explicit lead-recorded recheck with `source: lead_agent`, `verified: true`, an RFC3339 `checked_at`, a substantive summary, and the exact capability snapshot digest. The recheck cannot predate the observation, be materially future-dated, or exceed the freshness window enforced by the validator.
+`runtime-capabilities.json` must use schema v3, a valid timezone-aware RFC3339 `observed_at`, and exact `dispatch_control` evidence: `model_selectable=true`, `effort_selectable=true`, `model_parameter=model`, `effort_parameter=thinking`, and `source=host_tool_schema`. The scaffold adds one locked `reasoning_effort` with `source: user_session`; every model must advertise that effort in `supported_efforts` before it can run. Supplying the inventory does not by itself certify current availability. Before `--mode planned`, `runner_adapter.capability_evidence` must be an explicit lead-recorded recheck with `source: lead_agent`, `verified: true`, an RFC3339 `checked_at`, a substantive summary, and the exact capability snapshot digest. The recheck cannot predate the observation, be materially future-dated, or exceed the freshness window enforced by the validator.
 
 ### Route Policy
 
@@ -1059,7 +1081,7 @@ Sol   decides, interprets, plans, reviews, challenges, verifies,
 Terra executes a bounded packet with clear inputs, scope, and checks.
 ```
 
-Reasoning effort is not part of that decision. Use a runtime-provided current effort when available or the user's explicit statement; if neither is available, ask instead of guessing. The session effort is snapshotted once and copied unchanged into every minimum, selected, dispatched, and actual route. A lead or user may raise Terra to Sol with a reason and evidence references, but may not lower a Sol minimum or alter effort per lane. Terra unavailability may fall forward to Sol at the same effort; Sol unavailability becomes a human gate. An evidenced `insufficient_reasoning` transition may likewise change only Terra to Sol at the same effort. Route-changing evidence references must be safe POSIX workspace-relative paths, may not traverse parents or point to ephemeral/absolute locations, and must resolve to existing substantive artifacts. Escalation evidence must bind to the immediately preceding failed attempt.
+Reasoning effort is not part of that decision. It is read from the latest complete runtime `turn_context`, snapshotted once, and copied unchanged into every minimum, selected, dispatched, and actual route. Missing runtime evidence fails before scaffold; the workflow does not ask the user to restate a setting already owned by the session. A lead or user may raise Terra to Sol with a reason and evidence references, but may not lower a Sol minimum or alter effort per lane. Terra unavailability may fall forward to Sol at the same effort; Sol unavailability becomes a human gate. An evidenced `insufficient_reasoning` transition may likewise change only Terra to Sol at the same effort. Route-changing evidence references must be safe POSIX workspace-relative paths, may not traverse parents or point to ephemeral/absolute locations, and must resolve to existing substantive artifacts. Escalation evidence must bind to the immediately preceding failed attempt.
 
 ### Planned Lane Decision
 
@@ -1154,7 +1176,7 @@ Ordinals are contiguous, IDs are unique, and every child points to the immediate
 
 Claim facts determine whether verification is required and its minimum route. Planned mode validates verifier membership, author bindings, and route floors before dispatch. Final mode requires every named verifier to be a planned `verify` lane that completes with a pass gate, has a completed terminal actual route at or above the floor, uses a different recorded `agent_id` and `native_handle` from every lane named in `independent_of_lane_ids`, and exposes every `required_evidence` name as a substantive passing check. Missing evidence follows the decision's `more_discovery`, `human_gate`, or `blocked` action; it never silently passes.
 
-Capability data, identities, attempts, and actual routes are lead-recorded evidence in v2, not runtime attestation. Reports must say so. `swarm-card.json phases[].agents[].routing` is only a projection of the planned decision and terminal attempt:
+Capability availability and attempt outcomes remain lead-recorded evidence. `runtime_harness.py` replays the sealed Lead session, binds each native spawn request and started-child event to one append-only attempt in ordinal order, requires its normalized lane `task_name`, that attempt's dispatched `model`, and inherited `thinking`, then reopens the child JSONL and verifies its actual model and effort. This supports legal same-model retries and Terra-to-Sol fallback/escalation while rejecting omitted arguments, unrecorded spawns, failed starts, or host substitution. Reports must distinguish child-runtime attestation from lead-recorded outcome evidence. `swarm-card.json phases[].agents[].routing` is only a projection of the planned decision and terminal attempt:
 
 ```text
 packet_id, decision_id, planned_route, terminal_actual_route, effort_source, route_status, attempt_count

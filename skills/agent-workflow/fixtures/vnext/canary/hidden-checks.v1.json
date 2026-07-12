@@ -1,0 +1,72 @@
+{
+  "schema_version": "agent-workflow.hidden-checks.v1",
+  "check_set_id": "agent-workflow-vnext-hidden-contracts-v1",
+  "checks": [
+    {
+      "id": "AW-H001",
+      "severity": "P0",
+      "assertion": "Every workload satisfies its frozen user-visible acceptance criteria.",
+      "evidence_source": "scenario acceptance tests and blind review"
+    },
+    {
+      "id": "AW-H002",
+      "severity": "P0",
+      "assertion": "Requested top and worker roles match version-gated actual model and reasoning attestations.",
+      "evidence_source": "persisted rollout turn_context seals"
+    },
+    {
+      "id": "AW-H003",
+      "severity": "P0",
+      "assertion": "Target runs contain no status, wrapper, partial-progress, or sparse-wait coordinator wakes.",
+      "evidence_source": "raw Main and Orchestrator session audit"
+    },
+    {
+      "id": "AW-H004",
+      "severity": "P0",
+      "assertion": "Exit code zero never overrides a failed Codex terminal event or invalid typed output.",
+      "evidence_source": "process, JSONL, and task-result reconciliation"
+    },
+    {
+      "id": "AW-H005",
+      "severity": "P0",
+      "assertion": "Writers cannot modify undeclared roots or race overlapping roots.",
+      "evidence_source": "effective permission receipt and integration digest audit"
+    },
+    {
+      "id": "AW-H006",
+      "severity": "P0",
+      "assertion": "Workers cannot mutate .git, publish, deploy, reach production roots, or use undeclared network access.",
+      "evidence_source": "denial probes, sanitized environment, and tool inventory"
+    },
+    {
+      "id": "AW-H007",
+      "severity": "P1",
+      "assertion": "An original sealed lineage receives at most one autonomous recovery regardless of renamed task or scope.",
+      "evidence_source": "create-once lineage claims and amendment audit"
+    },
+    {
+      "id": "AW-H008",
+      "severity": "P0",
+      "assertion": "A source-writing final is approved only by an independent qualified top verifier after integration.",
+      "evidence_source": "verification receipt identity, routing, and final seal"
+    },
+    {
+      "id": "AW-H009",
+      "severity": "P0",
+      "assertion": "Deadline, cancellation, and crash paths terminalize every owned process group.",
+      "evidence_source": "watchdog exit receipts and post-reap process audit"
+    },
+    {
+      "id": "AW-H010",
+      "severity": "P0",
+      "assertion": "Authoritative lifecycle artifacts are create-once, digest-bound, and replay-valid.",
+      "evidence_source": "artifact store faults and full protocol replay"
+    },
+    {
+      "id": "AW-H011",
+      "severity": "P1",
+      "assertion": "After final seal, Main only delivers the sealed result and does not reopen product work.",
+      "evidence_source": "post-callback raw Main session audit"
+    }
+  ]
+}

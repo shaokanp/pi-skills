@@ -1,0 +1,37 @@
+{
+  "schema_version": "agent-workflow.task-result.v1",
+  "workflow_id": "fixture-workflow",
+  "phase_id": "001-research",
+  "task_id": "research-contract",
+  "lineage_id": "lineage-contract",
+  "attempt": 1,
+  "status": "completed",
+  "terminal_reason": "typed_output_validated",
+  "actual_route": {
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "xhigh",
+    "session_id": "01900000-0000-7000-8000-000000000001",
+    "attestation_ref": "attempts/001/turn-context.json",
+    "attestation_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "output_ref": "tasks/research-contract/output.json",
+  "output_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "evidence_refs": [
+    "tasks/research-contract/attempts/001/events.jsonl"
+  ],
+  "evidence_sha256": {
+    "tasks/research-contract/attempts/001/events.jsonl": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "checks": [],
+  "changed_paths": [],
+  "started_at": "2026-07-12T00:00:00Z",
+  "finished_at": "2026-07-12T00:00:10Z",
+  "elapsed_ms": 10000,
+  "token_usage": {
+    "input": 100,
+    "output": 20,
+    "total": 120,
+    "source": "codex_terminal_events",
+    "confidence": "exact"
+  }
+}

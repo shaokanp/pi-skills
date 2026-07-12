@@ -111,8 +111,9 @@ Expected behavior:
 
 - New Codex and Claude Code native scaffolds enable the policy automatically.
   Manual simulation and existing v1 workspaces remain unchanged when the block
-  is absent. Use `--execution-efficiency off` only for an explicit compatibility
-  rollback; `--execution-efficiency native` may still assert native-only intent.
+  is absent. `--execution-efficiency off` remains a non-Codex compatibility
+  rollback; new Codex workflows reject it because routing attestation is mandatory.
+  `--execution-efficiency native` may still assert native-only intent.
 - Keep planning and integration lead-owned. Require an explicit exception for a
   separate plan lane, enable seam only for real boundary risk, reject duplicate
   lane questions, use one agent per efficiency lane, and execute deterministic
@@ -166,15 +167,15 @@ Use an agent team workflow and route Codex subagents with the portable responsib
 
 Expected behavior:
 
-- New `codex_builtin_subagents` scaffolds enable routing automatically when given a lead-provided `--runtime-capabilities` JSON inventory, explicit `--reasoning-effort`, and fresh `--runner-capability-evidence`. The inventory file alone does not certify availability. Missing required evidence fails closed instead of silently disabling routing; `--model-routing off` is the explicit compatibility rollback.
+- New `codex_builtin_subagents` scaffolds require routing under orchestration schema v2. The Lead derives a v3 `--runtime-capabilities` inventory from the actual host tool schema, including selectable `model` and `thinking`, while current reasoning effort is inherited automatically from the matching Codex `turn_context`. Missing or foreign-session evidence fails before workspace creation; `--model-routing off` and Codex `--execution-efficiency off` are rejected.
 - Persist `routing-policy.json` and `runtime-capabilities.json` with canonical digests, and copy both snapshot IDs/digests into every planned lane decision.
 - Classify all packet facts, compute the ordered first-match decision, bind every required verifier and author lane, confirm planned verifier routes meet their floors, replace `draft`, and pass `--mode planned` before dispatch.
-- Snapshot one user-session reasoning effort and require every selected, dispatched, and actual route to preserve it. The router never chooses effort.
+- Snapshot the runtime session reasoning effort without asking the user to reset it, and require every selected, dispatched, and actual route to preserve it. The router never chooses effort; an explicit CLI effort is only an equality assertion.
 - Route Sol for thinking roles, material ambiguity, cross-boundary work, production or hard-to-reverse risk, weak verifiability, novelty, and judgment claims. Route Terra only for the bounded default execution case.
 - A reasoned lead/user request may raise Terra to Sol at the inherited effort. A request to lower Sol or change effort becomes a human gate or validation failure.
 - Keep one runner record per round/lane and append attempts. Retry keeps model and effort after context/tool failure; fallback or escalation may only change Terra to Sol while preserving effort. Route-changing evidence refs must be safe, existing, substantive workspace artifacts. Never rewrite the planned selection, digest, or earlier attempts.
 - In final mode, every routed lane ends with a completed terminal attempt. Every required verifier completes with a pass gate, meets the minimum terminal actual route, has a different recorded identity from every named author, and binds every required evidence name to a substantive passing check.
-- Label capability, identity, lifecycle, attempt, and actual-route evidence as lead-recorded. Do not call it runtime-attested or independently verified.
+- Label capability availability and attempt outcomes as lead-recorded. Final raw replay separately binds each spawn to a started child and ordered attempt, then verifies the child session's actual model and effort; do not extend that claim to semantic outcome quality.
 - Project routing into the optional Swarm Card from orchestration plus runner evidence. The card cannot become routing truth or execution evidence.
 
 Scoped regression commands:
@@ -185,7 +186,7 @@ python3 skills/agent-workflow/scripts/test_model_routing.py
 bash scripts/validate-skill.sh agent-workflow
 ```
 
-`test_model_routing.py` uses only the Python standard library. It executes every tracked positive and negative case under `fixtures/model-routing/`, creates disposable workspaces outside the repo, and covers helper validation plus legacy, routing-off, scaffold, planned, executed, and final routing paths.
+`test_model_routing.py` uses only the Python standard library. It executes every tracked positive and negative case under `fixtures/model-routing/`, creates disposable workspaces outside the repo, and covers helper validation plus legacy, routing-disable rejection, scaffold, planned, executed, and final routing paths. `test_runtime_harness.py` additionally rejects raw native spawns that omit or substitute `model` or `thinking`.
 
 ## Native Runner Adapter
 

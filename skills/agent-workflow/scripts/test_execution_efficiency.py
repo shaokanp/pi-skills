@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ PREPARE_DISPATCH = SKILL_ROOT / "scripts" / "prepare_dispatch.py"
 LANE_RECEIPT = SKILL_ROOT / "scripts" / "lane_receipt.py"
 COLLECT_RESULTS = SKILL_ROOT / "scripts" / "collect_results.py"
 VERIFY_WORKFLOW = SKILL_ROOT / "scripts" / "verify_workflow.py"
+TEST_SESSION_ID = "fixture-session"
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -38,13 +41,43 @@ def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def append_jsonl(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(value, ensure_ascii=False) + "\n")
+
+
+def write_codex_session(path: Path) -> None:
+    timestamp = "2026-07-11T00:00:00+00:00"
+    append_jsonl(
+        path,
+        {"timestamp": timestamp, "type": "session_meta", "payload": {"id": TEST_SESSION_ID}},
+    )
+    append_jsonl(
+        path,
+        {
+            "timestamp": timestamp,
+            "type": "turn_context",
+            "payload": {"model": "gpt-5.6-sol", "effort": "xhigh"},
+        },
+    )
+
+
 def run_command(*args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["CODEX_THREAD_ID"] = TEST_SESSION_ID
+    if "--runtime-session-log" in args:
+        session_path = Path(args[args.index("--runtime-session-log") + 1])
+        if session_path.parent.name != "sessions":
+            raise AssertionError("Codex fixture logs must live below CODEX_HOME/sessions")
+        env["CODEX_HOME"] = str(session_path.parent.parent)
     return subprocess.run(
         [sys.executable, *args],
         check=False,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=env,
     )
 
 
@@ -68,8 +101,6 @@ class ExecutionEfficiencyTests(unittest.TestCase):
             slug,
             "--runner-mode",
             runner_mode,
-            "--model-routing",
-            "off",
             "--lanes",
             lanes,
         ]
@@ -80,11 +111,70 @@ class ExecutionEfficiencyTests(unittest.TestCase):
                     "Fixture observed the native subagent surface.",
                 ]
             )
-        if efficiency is not None:
+        legacy_codex = runner_mode == "codex_builtin_subagents" and efficiency == "off"
+        if efficiency is not None and not legacy_codex:
             command.extend(["--execution-efficiency", efficiency])
+        if runner_mode == "codex_builtin_subagents":
+            fixture = load_json(
+                SKILL_ROOT / "fixtures" / "model-routing" / "positive.json"
+            )
+            capabilities = copy.deepcopy(fixture["capabilities"])
+            capabilities["observed_at"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=1)
+            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            capability_path = root / f"{slug}-capabilities.json"
+            write_json(capability_path, capabilities)
+            session_path = (
+                root
+                / f"{slug}-codex-home"
+                / "sessions"
+                / "rollout-fixture-session.jsonl"
+            )
+            write_codex_session(session_path)
+            command.extend(
+                [
+                    "--runtime-capabilities",
+                    str(capability_path),
+                    "--runtime-session-log",
+                    str(session_path),
+                ]
+            )
         result = run_command(*command)
         self.assertEqual(0, result.returncode, result.stdout)
-        return workflow_root / new_workflow.slugify(slug)
+        workflow = workflow_root / new_workflow.slugify(slug)
+        if runner_mode == "codex_builtin_subagents":
+            self.make_legacy_unrouted(workflow, strip_efficiency=legacy_codex)
+        return workflow
+
+    @staticmethod
+    def make_legacy_unrouted(workflow: Path, *, strip_efficiency: bool) -> None:
+        """Keep this suite focused on execution efficiency for legacy workspaces."""
+
+        orchestration = load_json(workflow / "orchestration.json")
+        orchestration["schema_version"] = "agent-loops.orchestration.v1"
+        orchestration.pop("model_routing_requirement", None)
+        orchestration.pop("model_routing", None)
+        if strip_efficiency:
+            orchestration.pop("clean_orchestrator_runtime", None)
+            orchestration.pop("execution_efficiency", None)
+        for round_plan in orchestration.get("rounds", []):
+            for lane in round_plan.get("lanes", []):
+                lane.pop("routing", None)
+        write_json(workflow / "orchestration.json", orchestration)
+        if strip_efficiency:
+            state = load_json(workflow / "state.json")
+            state.pop("runtime_contract", None)
+            write_json(workflow / "state.json", state)
+        evidence = load_json(workflow / "runner-evidence.json")
+        evidence.pop("model_capability_snapshot", None)
+        if strip_efficiency:
+            evidence.pop("execution_efficiency", None)
+            evidence.pop("completion_density", None)
+        write_json(workflow / "runner-evidence.json", evidence)
+        for name in ("routing-policy.json", "runtime-capabilities.json"):
+            path = workflow / name
+            if path.exists():
+                path.unlink()
 
     def prepare_planned(self, workflow: Path) -> dict[str, Any]:
         orchestration = load_json(workflow / "orchestration.json")
@@ -338,6 +428,18 @@ class ExecutionEfficiencyTests(unittest.TestCase):
             self.assertNotIn(
                 "execution_efficiency", load_json(native_off / "orchestration.json")
             )
+            rejected_off = run_command(
+                str(NEW_WORKFLOW),
+                "Native off rejection",
+                "--root",
+                str(root / "native-off-rejected"),
+                "--runner-mode",
+                "codex_builtin_subagents",
+                "--execution-efficiency",
+                "off",
+            )
+            self.assertNotEqual(0, rejected_off.returncode)
+            self.assertIn("incompatible with mandatory Codex routing", rejected_off.stdout)
 
     def test_disabled_policy_and_exact_runner_bindings(self) -> None:
         policy = execution_efficiency.build_execution_policy("codex_builtin_subagents")

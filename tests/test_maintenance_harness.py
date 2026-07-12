@@ -22,7 +22,9 @@ class MaintenanceHarnessTests(unittest.TestCase):
             ignore=shutil.ignore_patterns(
                 ".git",
                 ".claude",
+                ".workflow",
                 ".pi-skills.local.json",
+                ".pytest_cache",
                 "dist",
                 "__pycache__",
                 "*.pyc",
@@ -179,6 +181,64 @@ class MaintenanceHarnessTests(unittest.TestCase):
         result = self.run_script("scripts/validate-skill.sh", "explain")
         self.assertEqual(result.returncode, 1)
         self.assertIn("README.en.md contains incomplete placeholder", result.stderr)
+
+    def test_agent_workflow_validation_executes_vnext_release_suite(self) -> None:
+        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_vnext_suite.py"
+        sentinel.write_text(
+            "raise SystemExit('vnext release-gate sentinel executed')\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("vnext release-gate sentinel executed", result.stderr)
+
+    def test_agent_workflow_validation_executes_vnext_runtime_suite(self) -> None:
+        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_vnext_runtime.py"
+        sentinel.write_text(
+            "raise SystemExit('vnext runtime-gate sentinel executed')\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("vnext runtime-gate sentinel executed", result.stderr)
+
+    def test_agent_workflow_validation_executes_vnext_supervisor_suite(self) -> None:
+        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_process_supervisor.py"
+        sentinel.write_text(
+            "raise SystemExit('vnext supervisor-gate sentinel executed')\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("vnext supervisor-gate sentinel executed", result.stderr)
+
+    def test_agent_workflow_validation_executes_vnext_source_workspace_suite(self) -> None:
+        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_source_workspace.py"
+        sentinel.write_text(
+            "raise SystemExit('vnext source-workspace-gate sentinel executed')\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("vnext source-workspace-gate sentinel executed", result.stderr)
+
+    def test_agent_workflow_validation_executes_vnext_recovery_suite(self) -> None:
+        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_recovery_runtime.py"
+        sentinel.write_text(
+            "raise SystemExit('vnext recovery-gate sentinel executed')\n",
+            encoding="utf-8",
+        )
+        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("vnext recovery-gate sentinel executed", result.stderr)
 
     def test_missing_current_changelog_marker_fails_closed(self) -> None:
         changelog = self.root / "CHANGELOG.md"

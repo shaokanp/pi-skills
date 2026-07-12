@@ -1,0 +1,29 @@
+{
+  "schema_version": "agent-workflow.phase-plan.v1",
+  "phase_id": "001-research",
+  "generation_id": "generation-001",
+  "predecessor_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "authority_revision": 1,
+  "caused_by": [],
+  "intent": {
+    "reason": "Try an unsafe packet path.",
+    "expected_state_change": "This fixture must be rejected."
+  },
+  "phase_budget_seconds": 600,
+  "tasks": [
+    {
+      "task_id": "unsafe-task",
+      "lineage_id": "lineage-unsafe",
+      "criterion_id": "AC-1",
+      "criterion_revision": 1,
+      "role": "worker",
+      "work_mode": "read",
+      "packet_path": "../outside.md",
+      "packet_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "input_refs": [],
+      "input_sha256": {},
+      "write_roots": [],
+      "execution_deadline_seconds": 300
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "schema_version": "agent-workflow.final.v1",
+  "workflow_id": "fixture-workflow",
+  "generation_id": "generation-001",
+  "status": "complete",
+  "objective_outcome": "The fixture workflow satisfied AC-1.",
+  "verification_ref": "phases/002-verify/receipt.json",
+  "verification_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "phase_receipt_refs": [
+    "phases/001-research/receipt.json",
+    "phases/002-verify/receipt.json"
+  ],
+  "phase_receipt_sha256": {
+    "phases/001-research/receipt.json": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "phases/002-verify/receipt.json": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "amendment_refs": [],
+  "amendment_sha256": {},
+  "lineage_claim_refs": [],
+  "lineage_claim_sha256": {},
+  "p2_resolutions": [],
+  "accounting": {
+    "coverage": "partial",
+    "workflow_tokens": null,
+    "source": "pending_post_terminal_sidecar",
+    "confidence": "partial",
+    "boundary": "through_orchestrator_terminal"
+  },
+  "completion_density": {
+    "source": "pending_post_terminal_sidecar",
+    "forbidden_wakes": null,
+    "semantic_wakes": null,
+    "sparse_wait_continuations": null,
+    "target_eligible": null
+  },
+  "final_report_ref": "final-report.md",
+  "final_report_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "runtime_bundle_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "created_at": "2026-07-12T00:00:12Z"
+}

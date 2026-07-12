@@ -139,6 +139,15 @@ if [[ "$SKILL_ID" == "agent-workflow" ]]; then
   python3 "$SKILL_DIR/scripts/test_execution_efficiency.py"
   python3 "$SKILL_DIR/scripts/test_token_accounting.py"
   python3 "$SKILL_DIR/scripts/test_swarm_card.py"
+  python3 "$SKILL_DIR/scripts/test_vnext_suite.py"
+  python3 "$SKILL_DIR/scripts/test_vnext_candidate.py"
+  python3 "$SKILL_DIR/scripts/test_vnext_accounting.py"
+  python3 "$SKILL_DIR/scripts/test_vnext_canary.py"
+  python3 "$SKILL_DIR/scripts/test_inspect_legacy.py"
+  python3 "$SKILL_DIR/scripts/test_vnext_runtime.py"
+  python3 "$SKILL_DIR/scripts/test_process_supervisor.py"
+  python3 "$SKILL_DIR/scripts/test_source_workspace.py"
+  python3 "$SKILL_DIR/scripts/test_recovery_runtime.py"
 fi
 
 if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
