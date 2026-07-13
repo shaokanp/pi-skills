@@ -11,6 +11,7 @@ import signal
 import shutil
 import subprocess
 import sys
+sys.dont_write_bytecode = True
 import tempfile
 import threading
 import time
@@ -29,9 +30,11 @@ if str(SCRIPT_DIR) not in sys.path:
 from artifact_store import ArtifactError, create_once_json
 import baseline_gate
 import workflow_runtime
+import host_validation
 from source_workspace import (
     attest_writer_permissions,
     load_isolated_phase,
+    prepare_read_only_snapshot,
     prepare_isolated_phase,
     writer_profile_bytes,
 )
@@ -139,6 +142,152 @@ def capability_receipt(
 
 
 class ReadOnlyTracerTests(unittest.TestCase):
+    def test_workflow_admission_accepts_repository_root_read_scope(self) -> None:
+        workflow = json.loads(
+            (SCRIPT_DIR.parent / "fixtures/vnext/protocol/valid/workflow.json").read_bytes()
+        )
+        workflow["admission"]["relevant_roots"] = ["."]
+        validate_contract("workflow", workflow)
+
+    def test_host_capability_admission_revalidates_sealed_snapshot_not_live_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "fixture@example.com"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Fixture"], cwd=repository, check=True
+            )
+            (repository / "src").mkdir()
+            target = repository / "src/value.txt"
+            target.write_text("fixture\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            root = repository / ".workflow/run"
+
+            expected = prepare_read_only_snapshot(
+                root, repository, "000-host-capability-probe", (".",)
+            )
+            snapshot_ref = "runtime/read-snapshots/000-host-capability-probe/manifest.json"
+            snapshot_path = root / snapshot_ref
+            snapshot_evidence = {
+                "evidence_ref": snapshot_ref,
+                "evidence_sha256": digest(snapshot_path.read_bytes()),
+            }
+            observed = workflow_runtime._host_capability_worker_root(
+                root, repository, (".",), snapshot_evidence, require_live_state=True
+            )
+            self.assertEqual(observed, expected)
+            self.assertNotEqual(observed, repository)
+            self.assertFalse((observed / ".git").exists())
+            self.assertFalse((observed / ".workflow").exists())
+
+            target.write_text("drifted\n")
+            with self.assertRaisesRegex(RuntimeFailure, "snapshot failed closed"):
+                workflow_runtime._host_capability_worker_root(
+                    root,
+                    repository,
+                    (".",),
+                    snapshot_evidence,
+                    require_live_state=True,
+                )
+            self.assertEqual(
+                workflow_runtime._host_capability_worker_root(
+                    root,
+                    repository,
+                    (".",),
+                    snapshot_evidence,
+                    require_live_state=False,
+                ),
+                expected,
+            )
+
+            shutil.rmtree(root / "runtime/read-snapshots/000-host-capability-probe")
+            with self.assertRaisesRegex(RuntimeFailure, "snapshot is missing"):
+                workflow_runtime._host_capability_worker_root(
+                    root,
+                    repository,
+                    (".",),
+                    snapshot_evidence,
+                    require_live_state=True,
+                )
+
+            prepare_read_only_snapshot(root, repository, "000-host-capability-probe", (".",))
+            with self.assertRaisesRegex(RuntimeFailure, "snapshot manifest digest drifted"):
+                workflow_runtime._host_capability_worker_root(
+                    root,
+                    repository,
+                    (".",),
+                    snapshot_evidence,
+                    require_live_state=True,
+                )
+
+            replacement_ref = snapshot_ref
+            replacement_evidence = {
+                "evidence_ref": replacement_ref,
+                "evidence_sha256": digest((root / replacement_ref).read_bytes()),
+            }
+            self.assertEqual(
+                workflow_runtime._host_capability_worker_root(
+                    root,
+                    repository,
+                    (".",),
+                    replacement_evidence,
+                    require_live_state=False,
+                ),
+                expected,
+            )
+
+    def test_admit_and_run_phase_choose_snapshot_freshness_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            root = repository / ".workflow/run"
+            root.mkdir(parents=True)
+            codex = Path(raw) / "codex"
+            codex.write_text("fixture\n")
+            identity = (codex, digest(codex.read_bytes()), "fixture")
+
+            with (
+                mock.patch("workflow_runtime._load_source", return_value={}),
+                mock.patch("workflow_runtime.validate_contract"),
+                mock.patch("workflow_runtime._codex_identity", return_value=identity),
+                mock.patch(
+                    "workflow_runtime._validate_admission_inputs",
+                    side_effect=RuntimeFailure("stop after admission fence"),
+                ) as validate,
+            ):
+                with self.assertRaisesRegex(RuntimeFailure, "stop after admission fence"):
+                    workflow_runtime._admit_command(
+                        root, repository, root / "workflow-source.json", os.fspath(codex)
+                    )
+            self.assertTrue(validate.call_args.kwargs["require_host_snapshot_live_state"])
+
+            with (
+                mock.patch("workflow_runtime._load_source", return_value={}),
+                mock.patch("workflow_runtime._load_fixed_json", return_value={}),
+                mock.patch("workflow_runtime._codex_identity", return_value=identity),
+                mock.patch(
+                    "workflow_runtime._validate_admission_inputs",
+                    side_effect=RuntimeFailure("stop after phase fence"),
+                ) as validate,
+            ):
+                with self.assertRaisesRegex(RuntimeFailure, "stop after phase fence"):
+                    workflow_runtime._run_phase_command(
+                        root,
+                        repository,
+                        root / "plan-source.json",
+                        root / "auth.json",
+                        os.fspath(codex),
+                        1,
+                    )
+            self.assertFalse(validate.call_args.kwargs["require_host_snapshot_live_state"])
+
     def test_public_cli_exposes_fresh_host_capability_materializer(self) -> None:
         with self.assertRaises(SystemExit) as raised:
             main(["probe-host-capabilities", "--help"])
@@ -147,7 +296,7 @@ class ReadOnlyTracerTests(unittest.TestCase):
     def test_host_capability_receipt_replays_routes_permissions_tokens_and_denials(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw).resolve()
-            worker_root = root / "repo" / "src"
+            worker_root = root / "runtime/read-snapshots/000-host-capability-probe/checkout"
             worker_root.mkdir(parents=True)
             schema_path = root / "evidence" / "host-capability-probe" / "output-schema.json"
             schema_path.parent.mkdir(parents=True)
@@ -270,6 +419,14 @@ class ReadOnlyTracerTests(unittest.TestCase):
                 "evidence/focused-tests.txt",
                 ("\n".join(f"{name} ... ok" for name in names) + "\n\nOK\n").encode(),
             )
+            snapshot_ref, snapshot_sha = write(
+                "runtime/read-snapshots/000-host-capability-probe/manifest.json",
+                {
+                    "schema_version": "agent-workflow.read-snapshot.vnext.v1",
+                    "phase_id": "000-host-capability-probe",
+                    "checkout_ref": "runtime/read-snapshots/000-host-capability-probe/checkout",
+                },
+            )
             now = datetime.now(timezone.utc)
             receipt = {
                 "schema_version": "agent-workflow.host-capability-receipt.v1",
@@ -281,6 +438,10 @@ class ReadOnlyTracerTests(unittest.TestCase):
                     "codex_binary_sha256": "sha256:" + "2" * 64,
                 },
                 "relevant_root": os.fspath(worker_root),
+                "snapshot_manifest": {
+                    "evidence_ref": snapshot_ref,
+                    "evidence_sha256": snapshot_sha,
+                },
                 "execution": {
                     "started_at": now.isoformat().replace("+00:00", "Z"),
                     "finished_at": now.isoformat().replace("+00:00", "Z"),
@@ -377,6 +538,10 @@ class ReadOnlyTracerTests(unittest.TestCase):
             stale["observed_at"] = "2020-01-01T00:00:00Z"
             with self.assertRaisesRegex(RuntimeFailure, "stale"):
                 validate(stale)
+            invalid_root = deepcopy(receipt)
+            invalid_root["relevant_root"] = None
+            with self.assertRaisesRegex(RuntimeFailure, "relevant root drifted"):
+                validate(invalid_root)
             command_suffixes["worker"] = ["--dangerously-extra"]
             with self.assertRaisesRegex(RuntimeFailure, "command is not exact"):
                 validate(receipt)
@@ -409,8 +574,14 @@ class ReadOnlyTracerTests(unittest.TestCase):
     def test_host_capability_receipt_only_crash_recovers_summary_and_scrubs_auth(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repository = Path(raw) / "repo"
-            (repository / ".git").mkdir(parents=True)
+            repository.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
             (repository / "src").mkdir()
+            (repository / "src/value.txt").write_text("fixture\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
             root = repository / ".workflow" / "run"
             (root / "evidence").mkdir(parents=True)
             auth_path = root / "runtime" / "codex-homes" / "host-capability-worker" / "auth.json"
@@ -501,8 +672,14 @@ class ReadOnlyTracerTests(unittest.TestCase):
     def test_host_capability_full_command_reenters_after_pre_receipt_crash(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repository = Path(raw).resolve() / "repo"
-            (repository / ".git").mkdir(parents=True)
+            repository.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
             (repository / "src").mkdir()
+            (repository / "src/value.txt").write_text("fixture\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
             root = repository / ".workflow" / "run"
             binary = Path(raw) / "release/bin/codex"
             runtime_zsh = Path(raw) / "release/codex-resources/zsh/bin/zsh"
@@ -523,12 +700,16 @@ class ReadOnlyTracerTests(unittest.TestCase):
                 def execute(task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
                     role = str(task["role"])
                     executor_calls.append(role)
+                    self.assertTrue((config.repo_root / "src/value.txt").is_file())
+                    self.assertFalse((config.repo_root / ".git").exists())
+                    self.assertFalse((config.repo_root / ".workflow").exists())
+                    self.assertFalse((root / "auth.json").is_relative_to(config.repo_root))
                     session_id = f"{role}-session"
                     context = {
                         "model": "gpt-5.6-terra" if role == "worker" else "gpt-5.6-sol",
                         "effort": "xhigh",
                         "session_id": session_id,
-                        "workspace_roots": [os.fspath(repository / "src")],
+                        "workspace_roots": [os.fspath(config.repo_root)],
                         "sandbox_policy": {"type": "read-only"},
                         "permission_profile": {
                             "type": "managed",
@@ -537,7 +718,7 @@ class ReadOnlyTracerTests(unittest.TestCase):
                                 "type": "restricted",
                                 "entries": [
                                     {"path": {"type": "special", "value": {"kind": "minimal"}}, "access": "read"},
-                                    {"path": {"type": "path", "path": os.fspath(repository / "src")}, "access": "read"},
+                                    {"path": {"type": "path", "path": os.fspath(config.repo_root)}, "access": "read"},
                                     {"path": {"type": "path", "path": os.fspath(runtime_zsh)}, "access": "read"},
                                     {"path": {"type": "path", "path": os.fspath(config.codex_home / "tmp/arg0/codex-arg0fixture")}, "access": "read"},
                                 ],
@@ -600,7 +781,7 @@ class ReadOnlyTracerTests(unittest.TestCase):
                 ):
                     with self.assertRaisesRegex(RuntimeFailure, "injected pre-receipt crash"):
                         _probe_host_capabilities_command(
-                            root, repository, "src", root / "auth.json", os.fspath(binary)
+                            root, repository, ".", root / "auth.json", os.fspath(binary)
                         )
                 self.assertFalse((root / "evidence/host-capability-receipt.json").exists())
                 with mock.patch(
@@ -610,7 +791,7 @@ class ReadOnlyTracerTests(unittest.TestCase):
                     ],
                 ):
                     result = _probe_host_capabilities_command(
-                        root, repository, "src", root / "auth.json", os.fspath(binary)
+                        root, repository, ".", root / "auth.json", os.fspath(binary)
                     )
             self.assertEqual(result["status"], "pass")
             self.assertFalse(result["replayed"])
@@ -908,11 +1089,13 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             set(_RUNTIME_BUNDLE_FILES),
             {
                 "app_resume_adapter.py",
+                "host_validation.py",
                 "artifact_store.py",
                 "baseline_gate.py",
                 "phase_protocol.py",
                 "process_supervisor.py",
                 "recovery_runtime.py",
+                "repository_state.py",
                 "source_workspace.py",
                 "test_vnext_runtime.py",
                 "vnext_accounting.py",
@@ -945,6 +1128,210 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             )
             self.assertEqual(observed.returncode, 0, observed.stderr)
             self.assertEqual(json.loads(observed.stdout)["runtime_bundle_sha256"], expected)
+            self.assertEqual(
+                {path.name for path in (root / "runtime-bundle").iterdir()},
+                set(_RUNTIME_BUNDLE_FILES),
+            )
+
+    def test_direct_pinned_entry_points_never_materialize_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            _seal_runtime_bundle(root)
+            bundle_root = root / "runtime-bundle"
+            for entry_point in (
+                "workflow_runtime.py",
+                "process_supervisor.py",
+                "app_resume_adapter.py",
+                "baseline_gate.py",
+                "host_validation.py",
+                "test_vnext_runtime.py",
+            ):
+                observed = subprocess.run(
+                    [sys.executable, os.fspath(bundle_root / entry_point), "--help"],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertEqual(observed.returncode, 0, observed.stderr)
+                self.assertEqual(
+                    {path.name for path in bundle_root.iterdir()},
+                    set(_RUNTIME_BUNDLE_FILES),
+                    entry_point,
+                )
+
+    def test_host_validation_binds_integration_command_logs_and_repository_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw).resolve() / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
+            (repository / "tracked.txt").write_text("stable\n")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            subprocess.run(["git", "checkout", "-qb", "功能"], cwd=repository, check=True)
+            root = repository / ".workflow/host-validation"
+            receipt_ref = "phases/001-write/receipt.json"
+            (root / "phases/001-write").mkdir(parents=True)
+            workflow = {
+                "workflow_id": "host-validation",
+                "authority": {"revision": 1},
+                "success_criteria": [],
+            }
+            (root / "workflow.json").write_text(json.dumps(workflow) + "\n")
+            integration = fixture("phase-receipt.json")
+            integration.update({
+                "workflow_id": "host-validation",
+                "phase_id": "001-write",
+                "status": "completed",
+                "terminal_reason": "all_tasks_terminal",
+            })
+            integration["integration"] = {
+                "mode": "isolated_exact_base",
+                "status": "applied",
+                "patch_ref": "runtime/source-write/001-write/bounded-patch.json",
+                "patch_sha256": "sha256:" + "a" * 64,
+                "target_before": {"src": "sha256:" + "b" * 64},
+                "target_after": {"src": "sha256:" + "c" * 64},
+            }
+            integration_payload = (json.dumps(integration, sort_keys=True) + "\n").encode()
+            (root / receipt_ref).write_bytes(integration_payload)
+            spec = {
+                "schema_version": "agent-workflow.host-validation-spec.v1",
+                "workflow_id": "host-validation",
+                "authority_revision": 1,
+                "validation_id": "focused",
+                "integration_receipt_ref": receipt_ref,
+                "integration_receipt_sha256": digest(integration_payload),
+                "cwd": ".",
+                "environment": {},
+                "commands": [
+                    {
+                        "id": "python-smoke",
+                        "argv": [sys.executable, "-c", "print('host-validation-功能')"],
+                        "timeout_seconds": 30,
+                    }
+                ],
+            }
+            spec_path = root / "focused-spec.json"
+            spec_path.write_text(json.dumps(spec) + "\n")
+            invalid_cwd_spec = deepcopy(spec)
+            invalid_cwd_spec["cwd"] = None
+            invalid_cwd_path = root / "invalid-cwd-spec.json"
+            invalid_cwd_path.write_text(json.dumps(invalid_cwd_spec) + "\n")
+            invalid_output = io.StringIO()
+            with mock.patch("sys.stdout", invalid_output):
+                invalid_exit = host_validation.main([
+                    "--root",
+                    os.fspath(root),
+                    "--repo",
+                    os.fspath(repository),
+                    "--spec-source",
+                    os.fspath(invalid_cwd_path),
+                ])
+            self.assertEqual(invalid_exit, 2)
+            self.assertEqual(json.loads(invalid_output.getvalue())["status"], "runtime_failed")
+            result = host_validation.run_validation(root, repository, spec_path)
+            self.assertEqual(result["status"], "pass")
+            receipt = json.loads((root / result["receipt_ref"]).read_bytes())
+            self.assertTrue(receipt["repository_unchanged"])
+            self.assertEqual(receipt["commands"][0]["exit_code"], 0)
+            self.assertEqual(
+                (root / receipt["commands"][0]["stdout_ref"]).read_text(),
+                "host-validation-功能\n",
+            )
+            self.assertTrue(receipt["commands"][0]["argv_sha256"].startswith("sha256:"))
+            replayed = host_validation.run_validation(root, repository, spec_path)
+            self.assertTrue(replayed["replayed"])
+
+            changed_spec = deepcopy(spec)
+            changed_spec["commands"][0]["argv"] = [sys.executable, "-c", "raise SystemExit(9)"]
+            changed_path = root / "changed-spec.json"
+            changed_path.write_text(json.dumps(changed_spec) + "\n")
+            with self.assertRaisesRegex(host_validation.HostValidationError, "drifted"):
+                host_validation.run_validation(root, repository, changed_path)
+
+            prefix_spec = deepcopy(spec)
+            prefix_spec["commands"].append({
+                "id": "second-command",
+                "argv": [sys.executable, "-c", "print('second')"],
+                "timeout_seconds": 30,
+            })
+            prefix_path = root / "prefix-spec.json"
+            prefix_path.write_text(json.dumps(prefix_spec) + "\n")
+            prefix_receipt = deepcopy(receipt)
+            prefix_receipt["spec_sha256"] = digest(prefix_path.read_bytes())
+            receipt_path = root / result["receipt_ref"]
+            original_receipt = receipt_path.read_bytes()
+            receipt_path.write_text(
+                json.dumps(prefix_receipt, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            with self.assertRaisesRegex(host_validation.HostValidationError, "omitted sealed commands"):
+                host_validation.run_validation(root, repository, prefix_path)
+            receipt_path.write_bytes(original_receipt)
+
+            receipt_path.write_text('{"status":"pass"}\n')
+            with self.assertRaisesRegex(host_validation.HostValidationError, "replay failed"):
+                host_validation.run_validation(root, repository, spec_path)
+            receipt_path.write_bytes(original_receipt)
+
+            drift_spec = deepcopy(spec)
+            drift_spec["validation_id"] = "drift"
+            drift_spec["commands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('tracked.txt').write_text('drift\\n')",
+            ]
+            drift_path = root / "drift-spec.json"
+            drift_path.write_text(json.dumps(drift_spec) + "\n")
+            drift = host_validation.run_validation(root, repository, drift_path)
+            self.assertEqual(drift["status"], "fail")
+            drift_receipt = json.loads((root / drift["receipt_ref"]).read_bytes())
+            self.assertFalse(drift_receipt["repository_unchanged"])
+
+            (repository / "untracked.txt").write_text("before\n")
+            untracked_spec = deepcopy(spec)
+            untracked_spec["validation_id"] = "untracked-drift"
+            untracked_spec["commands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('untracked.txt').write_text('after\\n')",
+            ]
+            untracked_path = root / "untracked-drift-spec.json"
+            untracked_path.write_text(json.dumps(untracked_spec) + "\n")
+            untracked = host_validation.run_validation(root, repository, untracked_path)
+            self.assertEqual(untracked["status"], "fail")
+            untracked_receipt = json.loads((root / untracked["receipt_ref"]).read_bytes())
+            self.assertFalse(untracked_receipt["repository_unchanged"])
+
+            mode_file = repository / "mode-only.txt"
+            mode_file.write_text("same-bytes\n")
+            mode_file.chmod(0o644)
+            mode_spec = deepcopy(spec)
+            mode_spec["validation_id"] = "untracked-mode-drift"
+            mode_spec["commands"][0]["argv"] = [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('mode-only.txt').chmod(0o600)",
+            ]
+            mode_path = root / "untracked-mode-drift-spec.json"
+            mode_path.write_text(json.dumps(mode_spec) + "\n")
+            mode_result = host_validation.run_validation(root, repository, mode_path)
+            self.assertEqual(mode_result["status"], "fail")
+            mode_receipt = json.loads((root / mode_result["receipt_ref"]).read_bytes())
+            self.assertFalse(mode_receipt["repository_unchanged"])
+
+            amended_spec = deepcopy(spec)
+            amended_spec["authority_revision"] = 2
+            amended_spec["validation_id"] = "amended-authority"
+            amended_path = root / "amended-authority-spec.json"
+            amended_path.write_text(json.dumps(amended_spec) + "\n")
+            with mock.patch("host_validation.current_authority_revision", return_value=2):
+                amended = host_validation.run_validation(root, repository, amended_path)
+            self.assertEqual(amended["status"], "pass")
+            amended_receipt = json.loads((root / amended["receipt_ref"]).read_bytes())
+            self.assertEqual(amended_receipt["authority_revision"], 2)
 
     def test_partial_admission_bundle_crash_repairs_before_workflow_commit(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1024,6 +1411,19 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
                 },
             }
             self.assertIsNone(_attest_worker_permissions(context, worker_root, codex_home))
+            no_tool_context = deepcopy(context)
+            no_tool_context["permission_profile"]["file_system"]["entries"].pop()
+            self.assertIsNone(
+                _attest_worker_permissions(no_tool_context, worker_root, codex_home)
+            )
+            duplicate_arg0 = deepcopy(context)
+            duplicate_arg0["permission_profile"]["file_system"]["entries"].append(
+                deepcopy(duplicate_arg0["permission_profile"]["file_system"]["entries"][-1])
+            )
+            self.assertIn(
+                "incomplete or duplicated",
+                _attest_worker_permissions(duplicate_arg0, worker_root, codex_home),
+            )
             extra_read = deepcopy(context)
             extra_read["permission_profile"]["file_system"]["entries"].append(
                 {
@@ -2701,7 +3101,9 @@ while True:
             for value in workflow["admission"]["capabilities"].values():
                 value["evidence_ref"] = "evidence/capabilities.json"
                 value["evidence_sha256"] = digest(capability_bytes)
-            _validate_admission_inputs(root, workflow)
+            _validate_admission_inputs(
+                root, workflow, require_host_snapshot_live_state=True
+            )
             prefix_drift = deepcopy(capability)
             prefix_drift["capabilities"]["cancel_reap"]["status"] = (
                 "pass_with_missing_terminal"
@@ -2711,7 +3113,9 @@ while True:
             for value in workflow["admission"]["capabilities"].values():
                 value["evidence_sha256"] = digest(prefix_bytes)
             with self.assertRaisesRegex(RuntimeFailure, "contradicts declared status"):
-                _validate_admission_inputs(root, workflow)
+                _validate_admission_inputs(
+                    root, workflow, require_host_snapshot_live_state=True
+                )
             capability_path.write_bytes(capability_bytes)
             for value in workflow["admission"]["capabilities"].values():
                 value["evidence_sha256"] = digest(capability_bytes)
@@ -2728,14 +3132,18 @@ while True:
             for value in workflow["admission"]["capabilities"].values():
                 value["evidence_sha256"] = digest(incomplete_capability_bytes)
             with self.assertRaisesRegex(RuntimeFailure, "blocking transport probe"):
-                _validate_admission_inputs(root, workflow)
+                _validate_admission_inputs(
+                    root, workflow, require_host_snapshot_live_state=True
+                )
             receipt_path.write_bytes(receipt_bytes)
             capability_path.write_bytes(capability_bytes)
             for value in workflow["admission"]["capabilities"].values():
                 value["evidence_sha256"] = digest(capability_bytes)
             capability_path.write_text("{}\n")
             with self.assertRaisesRegex(RuntimeFailure, "capability evidence"):
-                _validate_admission_inputs(root, workflow)
+                _validate_admission_inputs(
+                    root, workflow, require_host_snapshot_live_state=True
+                )
 
     def test_source_write_capability_requires_profile_context_and_observed_denials(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2777,7 +3185,11 @@ while True:
             }
             request_payload = (json.dumps(request, sort_keys=True) + "\n").encode()
             (root / "evidence/supervisor-request.json").write_bytes(request_payload)
-            events_payload = b'{"type":"turn.completed"}\n'
+            events_payload = (
+                b'{"type":"item.completed","item":{"type":"agent_message",'
+                b'"text":"{\\\"answer\\\":\\\"ok\\\"}"}}\n'
+                b'{"type":"turn.completed"}\n'
+            )
             stderr_payload = b""
             (root / "evidence/supervisor-events.jsonl").write_bytes(events_payload)
             (root / "evidence/supervisor-stderr.log").write_bytes(stderr_payload)

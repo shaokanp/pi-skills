@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from artifact_store import ArtifactError, create_once_json
 from baseline_gate import BaselineError, _unpack, verify_baseline
+from repository_state import RepositoryStateError, collect_repository_state
 
 
 class SourceWriteError(RuntimeError):
@@ -95,6 +96,12 @@ def _safe_root(value: str) -> str:
     if any(part.casefold() in _RESERVED_PARTS for part in path.parts):
         raise SourceWriteError("write root cannot include a control or Git path")
     return path.as_posix()
+
+
+def _safe_read_root(value: str) -> str:
+    if value == ".":
+        return "."
+    return _safe_root(value)
 
 
 def _fold_path(value: str) -> tuple[str, ...]:
@@ -176,6 +183,175 @@ def dirty_paths(repository: Path) -> list[str]:
     return sorted(tracked | untracked)
 
 
+def prepare_read_only_snapshot(
+    control_root: Path,
+    repository: Path,
+    phase_id: str,
+    read_roots: tuple[str, ...],
+) -> Path:
+    """Materialize the live integrated source without Git or control-plane roots."""
+
+    control_root = Path(control_root).resolve()
+    repository = Path(repository).resolve(strict=True)
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", phase_id) is None:
+        raise SourceWriteError("read snapshot phase id is unsafe")
+    normalized_roots = tuple(_safe_read_root(value) for value in read_roots)
+    if not normalized_roots:
+        raise SourceWriteError("read snapshot requires at least one source root")
+    destination = control_root / "runtime" / "read-snapshots" / phase_id / "checkout"
+    manifest_ref = f"runtime/read-snapshots/{phase_id}/manifest.json"
+    manifest_path = control_root / manifest_ref
+    destination_exists = destination.exists() or destination.is_symlink()
+    manifest_exists = manifest_path.exists() or manifest_path.is_symlink()
+    if destination_exists != manifest_exists:
+        raise SourceWriteError("read snapshot transaction is incomplete")
+    try:
+        source_state = collect_repository_state(repository)
+    except RepositoryStateError as exc:
+        raise SourceWriteError(f"read snapshot repository state failed closed: {exc}") from exc
+
+    def selected(relative: str) -> bool:
+        parts = PurePosixPath(relative).parts
+        if not parts or any(part.casefold() in _RESERVED_PARTS for part in parts):
+            return False
+        folded = _fold_path(relative)
+        return any(
+            root == "." or folded[: len(_fold_path(root))] == _fold_path(root)
+            for root in normalized_roots
+        )
+
+    if not destination_exists:
+        destination.mkdir(parents=True, mode=0o700)
+        tracked_paths = set(_git_paths(repository, "ls-files", "--cached", "-z"))
+        untracked_paths = set(
+            _git_paths(repository, "ls-files", "--others", "--exclude-standard", "-z")
+        )
+        paths = sorted(tracked_paths | untracked_paths)
+        file_count = 0
+        byte_count = 0
+        for relative in paths:
+            if not selected(relative):
+                continue
+            source = repository / relative
+            if not source.exists() and not source.is_symlink():
+                if relative in tracked_paths:
+                    # A tracked worktree deletion is part of the integrated source state.
+                    continue
+                raise SourceWriteError("untracked source disappeared during snapshot creation")
+            file_count += 1
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            byte_count += _copy_read_snapshot_file_no_follow(source, target)
+            if file_count > MAX_SNAPSHOT_FILES or byte_count > MAX_SNAPSHOT_BYTES:
+                raise SourceWriteError("read snapshot exceeds its file or byte cap")
+        try:
+            if collect_repository_state(repository) != source_state:
+                raise SourceWriteError("repository changed during read snapshot creation")
+        except RepositoryStateError as exc:
+            raise SourceWriteError(f"read snapshot terminal repository state failed closed: {exc}") from exc
+    elif destination.is_symlink() or not destination.is_dir():
+        raise SourceWriteError("read snapshot destination is unsafe")
+
+    files = _regular_files(destination)
+    if any(
+        any(part.casefold() in _RESERVED_PARTS for part in PurePosixPath(relative).parts)
+        for relative in files
+    ):
+        raise SourceWriteError("read snapshot contains a reserved control path")
+    manifest = {
+        "schema_version": "agent-workflow.read-snapshot.vnext.v1",
+        "phase_id": phase_id,
+        "repository": os.fspath(repository),
+        "repository_state": source_state,
+        "repository_state_sha256": source_state["source_state_sha256"],
+        "read_roots": list(normalized_roots),
+        "checkout_ref": destination.relative_to(control_root).as_posix(),
+        "files": files,
+        "files_sha256": _digest(_canonical(files)),
+    }
+    _create_or_verify_json(control_root, manifest_ref, manifest)
+    return destination
+
+
+def replay_read_only_snapshot(
+    control_root: Path,
+    repository: Path,
+    phase_id: str,
+    read_roots: tuple[str, ...],
+    manifest_evidence: dict[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    """Replay one existing digest-bound snapshot without creating replacement authority."""
+
+    control_root = Path(control_root).resolve()
+    repository = Path(repository).resolve(strict=True)
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", phase_id) is None:
+        raise SourceWriteError("read snapshot phase id is unsafe")
+    normalized_roots = tuple(_safe_read_root(value) for value in read_roots)
+    expected_ref = f"runtime/read-snapshots/{phase_id}/manifest.json"
+    if not isinstance(manifest_evidence, dict) or set(manifest_evidence) != {
+        "evidence_ref",
+        "evidence_sha256",
+    }:
+        raise SourceWriteError("read snapshot manifest evidence is invalid")
+    if manifest_evidence["evidence_ref"] != expected_ref or not isinstance(
+        manifest_evidence["evidence_sha256"], str
+    ):
+        raise SourceWriteError("read snapshot manifest reference drifted")
+
+    destination = control_root / "runtime" / "read-snapshots" / phase_id / "checkout"
+    manifest_path = control_root / expected_ref
+    if (
+        destination.is_symlink()
+        or not destination.is_dir()
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+    ):
+        raise SourceWriteError("read snapshot is missing or unsafe")
+    if not destination.resolve(strict=True).is_relative_to(control_root):
+        raise SourceWriteError("read snapshot checkout escapes the control root")
+    payload = manifest_path.read_bytes()
+    if _digest(payload) != manifest_evidence["evidence_sha256"]:
+        raise SourceWriteError("read snapshot manifest digest drifted")
+    try:
+        manifest = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SourceWriteError("read snapshot manifest is invalid JSON") from exc
+    expected_keys = {
+        "schema_version",
+        "phase_id",
+        "repository",
+        "repository_state",
+        "repository_state_sha256",
+        "read_roots",
+        "checkout_ref",
+        "files",
+        "files_sha256",
+    }
+    expected_checkout_ref = f"runtime/read-snapshots/{phase_id}/checkout"
+    if not isinstance(manifest, dict) or set(manifest) != expected_keys:
+        raise SourceWriteError("read snapshot manifest contract is incomplete")
+    if (
+        manifest["schema_version"] != "agent-workflow.read-snapshot.vnext.v1"
+        or manifest["phase_id"] != phase_id
+        or manifest["repository"] != os.fspath(repository)
+        or manifest["read_roots"] != list(normalized_roots)
+        or manifest["checkout_ref"] != expected_checkout_ref
+    ):
+        raise SourceWriteError("read snapshot manifest authority drifted")
+    state = manifest["repository_state"]
+    if not isinstance(state, dict) or state.get("source_state_sha256") != manifest[
+        "repository_state_sha256"
+    ]:
+        raise SourceWriteError("read snapshot repository state binding is invalid")
+    state_payload = {key: value for key, value in state.items() if key != "source_state_sha256"}
+    if _digest(_canonical(state_payload)) != manifest["repository_state_sha256"]:
+        raise SourceWriteError("read snapshot repository state digest drifted")
+    files = _regular_files(destination)
+    if files != manifest["files"] or _digest(_canonical(files)) != manifest["files_sha256"]:
+        raise SourceWriteError("read snapshot checkout bytes or modes drifted")
+    return destination, manifest
+
+
 def _assert_no_dirty_overlap(repository: Path, roots: dict[str, tuple[str, ...]]) -> None:
     dirty = dirty_paths(repository)
     collisions = sorted(
@@ -210,6 +386,51 @@ def _regular_files(root: Path) -> dict[str, dict[str, Any]]:
             "mode": stat.S_IMODE(metadata.st_mode),
         }
     return files
+
+
+def _copy_read_snapshot_file_no_follow(source: Path, target: Path) -> int:
+    """Copy one exact source inode without reopening its pathname."""
+
+    source_fd = _open_regular_file_no_follow(source)
+    target_fd: int | None = None
+    try:
+        before = os.fstat(source_fd)
+        target_fd = os.open(
+            target,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            stat.S_IMODE(before.st_mode) or 0o600,
+        )
+        copied = 0
+        while True:
+            payload = os.read(source_fd, 1024 * 1024)
+            if not payload:
+                break
+            copied += len(payload)
+            view = memoryview(payload)
+            while view:
+                written = os.write(target_fd, view)
+                view = view[written:]
+        after = os.fstat(source_fd)
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+            raise SourceWriteError("read snapshot source changed during descriptor copy")
+        if copied != after.st_size:
+            raise SourceWriteError("read snapshot source size changed during descriptor copy")
+        os.fchmod(target_fd, stat.S_IMODE(after.st_mode) or 0o600)
+        os.fsync(target_fd)
+        return copied
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+        os.close(source_fd)
 
 
 def _tree_digest(repository: Path, relative: str) -> str:
@@ -345,6 +566,11 @@ def _materialize_baseline(
         if path.is_dir():
             continue
         relative = path.relative_to(materialized).as_posix()
+        if any(
+            part.casefold() in _RESERVED_PARTS
+            for part in PurePosixPath(relative).parts
+        ):
+            continue
         if not any(
             _fold_path(relative)[: len(_fold_path(root))] == _fold_path(root)
             for root in read_roots
@@ -690,7 +916,7 @@ def prepare_isolated_phase(
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", phase_id):
         raise SourceWriteError("source-writing phase id is unsafe for control-plane paths")
     roots = validate_write_roots(repository, tasks)
-    requested_reads = tuple(_safe_root(value) for value in (read_roots or ()))
+    requested_reads = tuple(_safe_read_root(value) for value in (read_roots or ()))
     snapshot_roots = tuple(
         sorted(
             {root for values in roots.values() for root in values} | set(requested_reads),

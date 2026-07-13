@@ -197,6 +197,11 @@ terminal barrier平行執行 pinned Terra／Sol read-only probes，逐一 seal r
 permission profile、terminal token usage、read-only denial與 focused lifecycle tests，再輸出可直接綁入
 `workflow.json`的 capability refs。`source_write`另組合 live `probe-source-write` 的
 `sandbox_isolation` binding。兩者皆綁 running bundle、Codex binary/version、relevant root與24小時 freshness。
+Host probe的`relevant_root`必須是該workflow create-once snapshot checkout；admission重播同一snapshot manifest
+並要求其canonical repository state仍等於live source。不得把isolated snapshot path與live checkout path直接比較，
+也不得為了通過admission改成讓worker讀live checkout。Host receipt必須另外綁snapshot manifest ref+digest；
+initial admission不得在checkout與manifest缺失時重建替代authority。完成initial admission後，後續phase仍重播同一
+immutable manifest與checkout bytes，但不得把合法integration造成的live source變化誤判為host-probe drift。
 
 Main→Clean Orchestrator lineage與最後只回 Main 一次，仍是 host-owned outer boundary；portable process無法
 不可偽造地判定「目前是哪一個 native child」，因此不得用可覆寫的環境變數、另一個 Main/child callback或
@@ -425,9 +430,23 @@ idempotent補 terminal、results與
 receipt。非 macOS或無 atomic exchange capability時 source-writing fail closed。
 
 Parallel writers只在 task roots互斥且 permission profile可 launch-time enforce時允許；否則改成單一
-writer/integrator。Control plane必須位於所有 worker readable/writable roots之外。
+writer/integrator。Control plane必須位於所有 worker readable/writable roots之外；repository-wide read
+必須來自排除`.git`、`.workflow`、Codex home與 credentials的 integrated-source snapshot，不可直接把
+live repository root交給 worker。Snapshot manifest必須逐檔綁定bytes與mode，成為read task result與final
+replay的transitive evidence；terminal fence需重驗manifest，tracked worktree deletion以檔案缺席表達。
+Snapshot copy必須從`O_NOFOLLOW` source file descriptor讀取，materialization前後重驗canonical repository
+state，禁止pathname replacement把credential或其他foreign target帶入snapshot。
 
 ## 14. Validation and final authority
+
+Source integration後的repository-level tests/build由host-owned validator執行，不授予isolated writer `.git`
+或廣泛toolchain read capability。Validator receipt需綁定exact applied integration、canonical spec、resolved
+argv/executable、sanitized environment、stdout/stderr、exit與repository前後狀態（含untracked bytes/mode）。
+Receipt replay必須重驗全部authority與referenced logs；Verifier的command claim只有在逐字匹配一份passed
+host-validation receipt時有效，一般phase/input receipt不可冒充command evidence。Pass receipt必須覆蓋sealed
+command list全量，並綁定verification之前最新的authoritative applied integration；repair後不得沿用repair前測試。
+Host receipt的post-validation source-state digest還必須與final verifier snapshot相同，測試後再修改source會使
+舊receipt失效。
 
 四層 proof chain：
 

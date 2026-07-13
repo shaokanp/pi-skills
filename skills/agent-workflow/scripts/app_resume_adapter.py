@@ -19,6 +19,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Recovery executes this adapter directly from the immutable pinned bundle.
+# Local imports must never create bytecode inside that sealed file set.
+sys.dont_write_bytecode = True
+
 from artifact_store import ArtifactError, create_once_json
 
 

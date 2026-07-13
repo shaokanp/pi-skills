@@ -15,6 +15,9 @@ import zlib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+# A pinned runtime directory is immutable authority, not a Python cache root.
+sys.dont_write_bytecode = True
+
 from artifact_store import ArtifactError, create_once_json
 
 

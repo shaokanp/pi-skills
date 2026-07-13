@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import stat
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -128,6 +129,14 @@ def _relative_path(value: Any, label: str) -> str:
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         raise ProtocolError(f"{label} must be a safe relative path")
     return text
+
+
+def _repository_read_root(value: Any, label: str) -> str:
+    """Accept the repository root without making `.` a valid artifact path."""
+
+    if value == ".":
+        return "."
+    return _relative_path(value, label)
 
 
 def _sha256(value: Any, label: str) -> str:
@@ -265,7 +274,10 @@ def _validate_workflow(value: dict[str, Any]) -> None:
     roots = admission["relevant_roots"]
     if not isinstance(roots, list) or not roots:
         raise ProtocolError("workflow.admission.relevant_roots must be a non-empty list")
-    normalized_roots = [_relative_path(root, "workflow.admission.relevant_roots[]") for root in roots]
+    normalized_roots = [
+        _repository_read_root(root, "workflow.admission.relevant_roots[]")
+        for root in roots
+    ]
     if len(normalized_roots) != len(set(normalized_roots)):
         raise ProtocolError("workflow.admission.relevant_roots must be unique")
 
@@ -1310,12 +1322,285 @@ def _validate_source_patch_replay(
             raise ProtocolError("integration terminal evidence contradicts the phase receipt")
 
 
+def _validate_read_snapshot_replay(
+    root: Path,
+    workflow: dict[str, Any],
+    plan: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    manifest_ref = f"runtime/read-snapshots/{plan['phase_id']}/manifest.json"
+    matching = [
+        check
+        for check in result["checks"]
+        if check["name"] == "host_read_snapshot_audit"
+    ]
+    if (
+        len(matching) != 1
+        or matching[0]["exit_code"] != 0
+        or matching[0]["evidence_ref"] != manifest_ref
+    ):
+        raise ProtocolError("verification result lacks one authoritative read snapshot audit")
+    payload = _read_artifact_bytes(root, manifest_ref, matching[0]["evidence_sha256"])
+    try:
+        manifest = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProtocolError("read snapshot manifest is invalid JSON") from exc
+    expected_keys = {
+        "schema_version",
+        "phase_id",
+        "repository",
+        "repository_state",
+        "repository_state_sha256",
+        "read_roots",
+        "checkout_ref",
+        "files",
+        "files_sha256",
+    }
+    if not isinstance(manifest, dict) or set(manifest) != expected_keys:
+        raise ProtocolError("read snapshot manifest contract is invalid")
+    if (
+        manifest["schema_version"] != "agent-workflow.read-snapshot.vnext.v1"
+        or manifest["phase_id"] != plan["phase_id"]
+        or manifest["read_roots"] != workflow["admission"]["relevant_roots"]
+        or manifest["checkout_ref"]
+        != f"runtime/read-snapshots/{plan['phase_id']}/checkout"
+        or not isinstance(manifest["repository"], str)
+    ):
+        raise ProtocolError("read snapshot manifest identity drifted")
+    repository_state = _object(manifest["repository_state"], "read-snapshot.repository_state")
+    _exact_keys(
+        repository_state,
+        {
+            "head",
+            "branch",
+            "tracked_diff_sha256",
+            "untracked_manifest_sha256",
+            "source_state_sha256",
+        },
+        "read-snapshot.repository_state",
+    )
+    state_payload = {
+        key: repository_state[key]
+        for key in ("head", "branch", "tracked_diff_sha256", "untracked_manifest_sha256")
+    }
+    _text(repository_state["head"], "read-snapshot.repository_state.head")
+    if not isinstance(repository_state["branch"], str):
+        raise ProtocolError("read-snapshot.repository_state.branch must be a string")
+    for key in ("tracked_diff_sha256", "untracked_manifest_sha256", "source_state_sha256"):
+        _sha256(repository_state[key], f"read-snapshot.repository_state.{key}")
+    _sha256(manifest["repository_state_sha256"], "read-snapshot.repository_state_sha256")
+    if (
+        repository_state["source_state_sha256"] != _payload_digest(_canonical_bytes(state_payload))
+        or manifest["repository_state_sha256"] != repository_state["source_state_sha256"]
+    ):
+        raise ProtocolError("read snapshot repository state digest drifted")
+    files = _object(manifest["files"], "read-snapshot.files")
+    _sha256(manifest["files_sha256"], "read-snapshot.files_sha256")
+    if manifest["files_sha256"] != _payload_digest(_canonical_bytes(files)):
+        raise ProtocolError("read snapshot file manifest digest drifted")
+    checkout = root / manifest["checkout_ref"]
+    if checkout.is_symlink() or not checkout.is_dir():
+        raise ProtocolError("read snapshot checkout is missing or unsafe")
+    observed: dict[str, dict[str, Any]] = {}
+    for path in sorted(checkout.rglob("*")):
+        relative = path.relative_to(checkout).as_posix()
+        if path.is_symlink():
+            raise ProtocolError("read snapshot contains a symlink")
+        metadata = path.stat()
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink > 1:
+            raise ProtocolError("read snapshot contains an unsafe file")
+        parts = PurePosixPath(relative).parts
+        if any(part.casefold() in _RESERVED_WRITE_ROOTS for part in parts):
+            raise ProtocolError("read snapshot contains a control-plane path")
+        observed[relative] = {
+            "sha256": _payload_digest(path.read_bytes()),
+            "mode": stat.S_IMODE(metadata.st_mode),
+        }
+    if observed != files:
+        raise ProtocolError("read snapshot checkout bytes drifted from its manifest")
+    return manifest
+
+
+def validate_host_validation_receipt(
+    root: Path,
+    receipt_ref: str,
+    receipt_sha256: str,
+    *,
+    workflow_id: str | None = None,
+    authority_revision: int | None = None,
+    require_pass: bool = False,
+) -> dict[str, Any]:
+    """Replay one typed host-validation receipt and all referenced command logs."""
+
+    payload = _read_artifact_bytes(root, receipt_ref, receipt_sha256)
+    try:
+        receipt = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProtocolError("host-validation receipt is invalid JSON") from exc
+    expected = {
+        "schema_version",
+        "workflow_id",
+        "authority_revision",
+        "validation_id",
+        "status",
+        "spec_sha256",
+        "integration_receipt_ref",
+        "integration_receipt_sha256",
+        "cwd",
+        "environment",
+        "started_at",
+        "finished_at",
+        "repository_before",
+        "repository_after",
+        "repository_unchanged",
+        "commands",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != expected:
+        raise ProtocolError("host-validation receipt contract is invalid")
+    if receipt["schema_version"] != "agent-workflow.host-validation-receipt.v1":
+        raise ProtocolError("host-validation receipt schema is invalid")
+    _slug(receipt["workflow_id"], "host-validation.workflow_id")
+    _integer(receipt["authority_revision"], "host-validation.authority_revision", minimum=1)
+    _slug(receipt["validation_id"], "host-validation.validation_id")
+    _sha256(receipt["spec_sha256"], "host-validation.spec_sha256")
+    _relative_path(receipt["integration_receipt_ref"], "host-validation.integration_receipt_ref")
+    _sha256(receipt["integration_receipt_sha256"], "host-validation.integration_receipt_sha256")
+    _text(receipt["cwd"], "host-validation.cwd")
+    if workflow_id is not None and receipt["workflow_id"] != workflow_id:
+        raise ProtocolError("host-validation workflow identity drifted")
+    if authority_revision is not None and receipt["authority_revision"] != authority_revision:
+        raise ProtocolError("host-validation authority revision drifted")
+
+    environment = _object(receipt["environment"], "host-validation.environment")
+    if not environment or any(
+        not isinstance(key, str)
+        or not key
+        or not isinstance(value, str)
+        or len(value) > 4096
+        for key, value in environment.items()
+    ):
+        raise ProtocolError("host-validation environment is invalid")
+
+    def validate_repository(value: Any, label: str) -> dict[str, Any]:
+        evidence = _object(value, label)
+        _exact_keys(
+            evidence,
+            {
+                "head",
+                "branch",
+                "tracked_diff_sha256",
+                "untracked_manifest_sha256",
+                "source_state_sha256",
+            },
+            label,
+        )
+        _text(evidence["head"], f"{label}.head")
+        if not isinstance(evidence["branch"], str):
+            raise ProtocolError(f"{label}.branch must be a string")
+        _sha256(evidence["tracked_diff_sha256"], f"{label}.tracked_diff_sha256")
+        _sha256(evidence["untracked_manifest_sha256"], f"{label}.untracked_manifest_sha256")
+        _sha256(evidence["source_state_sha256"], f"{label}.source_state_sha256")
+        state_payload = {
+            key: evidence[key]
+            for key in ("head", "branch", "tracked_diff_sha256", "untracked_manifest_sha256")
+        }
+        if evidence["source_state_sha256"] != _payload_digest(_canonical_bytes(state_payload)):
+            raise ProtocolError(f"{label}.source_state_sha256 drifted")
+        return evidence
+
+    before = validate_repository(receipt["repository_before"], "host-validation.repository_before")
+    after = validate_repository(receipt["repository_after"], "host-validation.repository_after")
+    if not isinstance(receipt["repository_unchanged"], bool):
+        raise ProtocolError("host-validation repository_unchanged must be boolean")
+    if receipt["repository_unchanged"] != (before == after):
+        raise ProtocolError("host-validation repository stability claim is invalid")
+
+    started = _parsed_rfc3339(receipt["started_at"], "host-validation.started_at")
+    finished = _parsed_rfc3339(receipt["finished_at"], "host-validation.finished_at")
+    if finished < started:
+        raise ProtocolError("host-validation timestamps are inverted")
+    commands = receipt["commands"]
+    if not isinstance(commands, list) or not commands or len(commands) > 16:
+        raise ProtocolError("host-validation commands are invalid")
+    command_ids: set[str] = set()
+    all_pass = True
+    for index, raw in enumerate(commands):
+        label = f"host-validation.commands[{index}]"
+        command = _object(raw, label)
+        _exact_keys(
+            command,
+            {
+                "id",
+                "argv",
+                "argv_sha256",
+                "executable_sha256",
+                "timeout_seconds",
+                "started_at",
+                "finished_at",
+                "elapsed_ms",
+                "exit_code",
+                "timed_out",
+                "stdout_ref",
+                "stdout_sha256",
+                "stderr_ref",
+                "stderr_sha256",
+            },
+            label,
+        )
+        command_id = _slug(command["id"], f"{label}.id")
+        if command_id in command_ids:
+            raise ProtocolError("host-validation command ids must be unique")
+        command_ids.add(command_id)
+        argv = command["argv"]
+        if not isinstance(argv, list) or not argv or not all(
+            isinstance(item, str) and item and len(item) <= 8192 for item in argv
+        ):
+            raise ProtocolError(f"{label}.argv is invalid")
+        if not Path(argv[0]).is_absolute():
+            raise ProtocolError(f"{label}.argv executable must be absolute")
+        _sha256(command["argv_sha256"], f"{label}.argv_sha256")
+        if command["argv_sha256"] != _payload_digest(_canonical_bytes(argv)):
+            raise ProtocolError(f"{label}.argv digest drifted")
+        _sha256(command["executable_sha256"], f"{label}.executable_sha256")
+        timeout_seconds = _integer(
+            command["timeout_seconds"], f"{label}.timeout_seconds", minimum=1
+        )
+        if timeout_seconds > 3600:
+            raise ProtocolError(f"{label}.timeout_seconds exceeds the contract maximum")
+        command_started = _parsed_rfc3339(command["started_at"], f"{label}.started_at")
+        command_finished = _parsed_rfc3339(command["finished_at"], f"{label}.finished_at")
+        if command_started < started or command_finished < command_started or command_finished > finished:
+            raise ProtocolError(f"{label} chronology is invalid")
+        _integer(command["elapsed_ms"], f"{label}.elapsed_ms")
+        if not isinstance(command["exit_code"], int) or isinstance(command["exit_code"], bool):
+            raise ProtocolError(f"{label}.exit_code must be an integer")
+        if not isinstance(command["timed_out"], bool):
+            raise ProtocolError(f"{label}.timed_out must be boolean")
+        for stream in ("stdout", "stderr"):
+            ref = _relative_path(command[f"{stream}_ref"], f"{label}.{stream}_ref")
+            digest = _sha256(command[f"{stream}_sha256"], f"{label}.{stream}_sha256")
+            _read_artifact_bytes(root, ref, digest)
+        if command["exit_code"] != 0 or command["timed_out"]:
+            all_pass = False
+    derived_status = "pass" if all_pass and receipt["repository_unchanged"] else "fail"
+    if receipt["status"] != derived_status:
+        raise ProtocolError("host-validation status does not match its evidence")
+    if require_pass and receipt["status"] != "pass":
+        raise ProtocolError("host-validation receipt did not pass")
+    return receipt
+
+
 def _validate_verification_decision(
     root: Path,
     workflow: dict[str, Any],
     plan: dict[str, Any],
     result: dict[str, Any],
     final: dict[str, Any],
+    expected_integration_ref: str,
+    expected_integration_sha256: str,
+    expected_source_state_sha256: str,
 ) -> None:
     if result["output_ref"] is None:
         raise ProtocolError("verification result requires a decision output")
@@ -1351,6 +1636,51 @@ def _validate_verification_decision(
 
     allowed_evidence = set(result["evidence_refs"])
     allowed_evidence.update(item["evidence_ref"] for item in result["checks"])
+    verification_tasks = [
+        task for task in plan["tasks"] if task["task_id"] == result["task_id"]
+    ]
+    if len(verification_tasks) != 1:
+        raise ProtocolError("verification result has no unique planned task")
+    verifier_inputs = verification_tasks[0]["input_refs"]
+    allowed_evidence.update(verifier_inputs)
+    host_validation_commands: dict[str, list[dict[str, Any]]] = {}
+    for input_ref in verifier_inputs:
+        if not re.fullmatch(r"evidence/host-validations/[^/]+/receipt\.json", input_ref):
+            continue
+        receipt = validate_host_validation_receipt(
+            root,
+            input_ref,
+            verification_tasks[0]["input_sha256"][input_ref],
+            workflow_id=workflow["workflow_id"],
+            authority_revision=plan["authority_revision"],
+            require_pass=True,
+        )
+        integration_ref = receipt["integration_receipt_ref"]
+        integration_sha256 = receipt["integration_receipt_sha256"]
+        if (
+            integration_ref != expected_integration_ref
+            or integration_sha256 != expected_integration_sha256
+            or verification_tasks[0]["input_sha256"].get(integration_ref)
+            != integration_sha256
+            or final["phase_receipt_sha256"].get(integration_ref)
+            != integration_sha256
+        ):
+            raise ProtocolError("host-validation receipt does not bind the latest authoritative integration")
+        if receipt["repository_after"]["source_state_sha256"] != expected_source_state_sha256:
+            raise ProtocolError("host-validation receipt is stale relative to the verifier snapshot")
+        integration = _read_json_artifact(
+            root,
+            integration_ref,
+            integration_sha256,
+            "phase-receipt",
+        )
+        if (
+            integration["workflow_id"] != workflow["workflow_id"]
+            or integration["integration"]["mode"] != "isolated_exact_base"
+            or integration["integration"]["status"] != "applied"
+        ):
+            raise ProtocolError("host-validation receipt requires an applied authoritative integration")
+        host_validation_commands[input_ref] = receipt["commands"]
     criteria = decision["criteria"]
     expected_criteria = {item["id"] for item in workflow["success_criteria"]}
     observed_criteria: dict[str, str] = {}
@@ -1415,14 +1745,21 @@ def _validate_verification_decision(
             "evidence_ref",
         }:
             raise ProtocolError(f"verification command {index} is invalid")
+        matching_commands = host_validation_commands.get(item.get("evidence_ref"), [])
+        matching = [
+            command
+            for command in matching_commands
+            if shlex.join(command["argv"]) == item.get("command")
+            and command["exit_code"] == item.get("exit_code")
+        ]
         if (
             not isinstance(item["command"], str)
             or not item["command"].strip()
             or not isinstance(item["exit_code"], int)
             or isinstance(item["exit_code"], bool)
-            or item["evidence_ref"] not in allowed_evidence
+            or len(matching) != 1
         ):
-            raise ProtocolError("verification command evidence is invalid")
+            raise ProtocolError("verification command requires one matching passed host-validation receipt")
 
     if final["status"] == "complete":
         if (
@@ -1815,6 +2152,12 @@ def validate_replay(
         if phase_records[verification_ref][1]["generation_id"] != final["generation_id"]:
             raise ProtocolError("final generation must own the verification phase")
         verifier_result = phase_results[verification_ref][verifier_plan["tasks"][0]["task_id"]]
+        verifier_snapshot = _validate_read_snapshot_replay(
+            root,
+            workflow,
+            verifier_plan,
+            verifier_result,
+        )
         verifier_route = verifier_result["actual_route"]
         prior_session_ids = {
             result["actual_route"]["session_id"]
@@ -1825,12 +2168,24 @@ def validate_replay(
         }
         if verifier_route is None or verifier_route["session_id"] in prior_session_ids:
             raise ProtocolError("verification session identity is not independent")
+        prior_applied_integrations = [
+            (phase_ref, record[2])
+            for phase_ref, record in phase_records.items()
+            if phase_ref != verification_ref
+            and record[1]["integration"]["status"] == "applied"
+        ]
+        if not prior_applied_integrations:
+            raise ProtocolError("complete verification lacks an applied source integration")
+        latest_integration_ref, latest_integration_sha256 = prior_applied_integrations[-1]
         _validate_verification_decision(
             root,
             workflow,
             verifier_plan,
             verifier_result,
             final,
+            latest_integration_ref,
+            latest_integration_sha256,
+            verifier_snapshot["repository_state_sha256"],
         )
 
     _read_artifact_bytes(root, final["final_report_ref"], final["final_report_sha256"])

@@ -25,6 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
+# This file also executes directly from the immutable pinned runtime bundle.
+# Prevent local imports from materializing __pycache__ beside sealed authority.
+sys.dont_write_bytecode = True
+
 from artifact_store import ArtifactError, create_once_bytes, create_once_json
 
 
