@@ -113,6 +113,30 @@ list, and its integration ref must be the latest authoritative applied source
 phase before verification. The receipt's canonical source-state digest must also
 equal the final verifier snapshot state; an older pre-repair or pre-edit test run
 is stale evidence.
+The admission baseline is immutable, while the workflow candidate head is
+cumulative. Before each writer Phase, the runtime validates the terminal receipt
+chain and replays each prior applied bounded patch over the admission snapshot.
+The source-head manifest binds no-follow receipt, plan, generation-claim, task-result,
+typed-output, host-check, patch, and integration-terminal evidence plus continuous
+before/after anchor hashes. Workflow-owned dirty paths may be revisited only when
+every selected live read/write dependency equals that derived head; original user
+dirt or unexplained cross-anchor edits still fail closed.
+New source Phase seals include the selected dependency roots and exact file
+manifest. The runtime replays that seal before Phase authority, immediately
+before each executor and watchdog launch, and at integration. A pre-launch drift
+starts no actor; a later drift cannot reach the shared checkout. These are host
+checks and grant the worker no additional read or write permission.
+Every production writer schema must require `changed_paths: string[]`, and that
+set must equal the host-observed patch before publication or atomic exchange.
+All routed output schemas are structurally preflighted before Phase authority or
+model launch against [OpenAI's strict Structured Outputs subset](https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas): an object root,
+nested `anyOf`, nullable `[type, null]` unions, complete required object properties,
+`additionalProperties:false`, typed array items, type-correct `const`/`enum`, at
+most ten object levels, and at most 5,000 total object properties.
+Packet, schema, and model-output decoding is strict JSON: Python-only `NaN` and
+positive or negative `Infinity` constants are rejected. Patch and integration-
+terminal replay walks every path component with `O_NOFOLLOW`; a later safe
+reread cannot legitimize an earlier pathname-following read.
 Every Python entry point that may execute directly from the pinned directory
 disables bytecode emission before importing another bundle member. `__pycache__`
 is executable file-set drift and remains a hard failure; it is never ignored or

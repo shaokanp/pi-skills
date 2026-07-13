@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from source_workspace import (
     DirtyOverlap,
+    IntegrationConflict,
     SourceWriteError,
     attest_writer_permissions,
     integrate_isolated_phase,
@@ -130,7 +131,6 @@ class SourceWorkspaceTests(unittest.TestCase):
             baseline = self.baseline(repo)
             self.assertTrue(baseline_gate._unpack(baseline["staged_binary_patch"], "staged"))
             self.assertTrue(baseline_gate._unpack(baseline["unstaged_binary_patch"], "unstaged"))
-            source.write_text("later-live-drift\n")
             phase = prepare_isolated_phase(
                 repo / ".workflow/run",
                 repo,
@@ -141,6 +141,15 @@ class SourceWorkspaceTests(unittest.TestCase):
             workspace = phase.tasks["api"].root
             self.assertEqual((workspace / "lib/input.txt").read_text(), "sealed-worktree\n")
             self.assertEqual((workspace / "lib/untracked.bin").read_bytes(), b"\x00sealed\xff")
+            source.write_text("later-live-drift\n")
+            with self.assertRaisesRegex(IntegrationConflict, "external drift"):
+                prepare_isolated_phase(
+                    repo / ".workflow/drift",
+                    repo,
+                    self.plan(("api", ["src/api"])),
+                    read_roots=("src", "lib"),
+                    admission_baseline=baseline,
+                )
             self.assertEqual(source.read_text(), "later-live-drift\n")
 
     def test_repository_root_read_scope_materializes_all_tracked_inputs(self) -> None:
