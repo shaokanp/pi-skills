@@ -3,10 +3,33 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILL_ID="${1:-}"
-VERSION_OVERRIDE="${2:-}"
+VERSION_OVERRIDE=""
+PREFLIGHT_VALIDATED=0
+
+shift || true
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --preflight-validated)
+      PREFLIGHT_VALIDATED=1
+      shift
+      ;;
+    -* )
+      echo "unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      if [[ -n "$VERSION_OVERRIDE" ]]; then
+        echo "unexpected argument: $1" >&2
+        exit 2
+      fi
+      VERSION_OVERRIDE="$1"
+      shift
+      ;;
+  esac
+done
 
 if [[ -z "$SKILL_ID" ]]; then
-  echo "usage: scripts/package-skill.sh <skill-id> [version]" >&2
+  echo "usage: scripts/package-skill.sh <skill-id> [version] [--preflight-validated]" >&2
   exit 2
 fi
 
@@ -34,7 +57,9 @@ SOURCE_REL="$(registry_value source)"
 VERSION="${VERSION_OVERRIDE:-$(registry_value version)}"
 ARCHIVE="dist/${SKILL_ID}-${VERSION}.tar.gz"
 
-bash "$ROOT/scripts/validate-skill.sh" "$SKILL_ID"
+if [[ "$PREFLIGHT_VALIDATED" -eq 0 ]]; then
+  bash "$ROOT/scripts/validate-skill.sh" "$SKILL_ID"
+fi
 
 mkdir -p "$ROOT/dist"
 python3 "$ROOT/scripts/package_skill.py" "$ROOT" "$SOURCE_REL" "$ROOT/$ARCHIVE"

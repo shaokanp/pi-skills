@@ -2,7 +2,8 @@
 
 ## 1. Validate And Package
 
-Run the full public preflight:
+After focused development checks and source freeze, run the full public
+preflight once:
 
 ```bash
 bash scripts/preflight.sh
@@ -10,7 +11,10 @@ bash scripts/preflight.sh
 
 This runs structural skill validation, scans the current publishable tree,
 packages every registered skill under `dist/` with a SHA-256 checksum, and
-checks generated artifact metadata for private paths.
+checks generated artifact metadata for private paths. Success writes a receipt
+under worktree-specific Git metadata. The receipt binds the exact public tree,
+Python/Bash/platform identity, local-policy digest, and optional validator
+digest; a changed input cannot reuse it.
 
 For a non-mutating repository/session diagnostic, run:
 
@@ -113,9 +117,8 @@ brew install gitleaks
 bash scripts/install-hooks.sh
 ```
 
-- `pre-commit` scans the staged Git index and blocks staged content that a clean
-  working-tree scan could miss.
-- `pre-push` requires a clean tree, runs the complete package preflight, and
+- `pre-commit` performs only fast staged-diff and staged-index safety checks.
+- `pre-push` requires a clean tree, runs or reuses the exact-fingerprint package preflight, and
   scans the exact commits and tags from Git's pre-push ref stream.
 - `publish-preflight` also runs Gitleaks over an archive of the tracked `HEAD`
   distribution and local Git refs. Ignored local workspaces are not part of the
@@ -160,5 +163,5 @@ manually, and add newly discovered private markers to the ignored local config.
 ## Rollback
 
 Local rollback is source-driven: check out the previously accepted source
-commit, run the same preflight, and release that version with `--execute`.
+commit, run or reuse that tree's preflight receipt, and release that version with `--execute`.
 Installed skill directories are not edited manually.

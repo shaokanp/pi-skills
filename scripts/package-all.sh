@@ -2,6 +2,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PREFLIGHT_VALIDATED=0
+
+if [[ "${1:-}" == "--preflight-validated" ]]; then
+  PREFLIGHT_VALIDATED=1
+  shift
+fi
+if [[ $# -ne 0 ]]; then
+  echo "usage: scripts/package-all.sh [--preflight-validated]" >&2
+  exit 2
+fi
 
 # dist is generated output. Rebuild the archive set from the current registry so
 # removed skills and superseded versions cannot survive into a public release.
@@ -21,5 +31,9 @@ PY
 )"
 
 for skill_id in $IDS; do
-  bash "$ROOT/scripts/package-skill.sh" "$skill_id"
+  if [[ "$PREFLIGHT_VALIDATED" -eq 1 ]]; then
+    bash "$ROOT/scripts/package-skill.sh" "$skill_id" --preflight-validated
+  else
+    bash "$ROOT/scripts/package-skill.sh" "$skill_id"
+  fi
 done
