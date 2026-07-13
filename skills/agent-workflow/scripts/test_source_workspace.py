@@ -25,6 +25,7 @@ from source_workspace import (
     attest_writer_permissions,
     integrate_isolated_phase,
     prepare_isolated_phase,
+    prepare_read_only_snapshot,
     validate_write_roots,
     writer_profile_bytes,
 )
@@ -141,6 +142,106 @@ class SourceWorkspaceTests(unittest.TestCase):
             self.assertEqual((workspace / "lib/input.txt").read_text(), "sealed-worktree\n")
             self.assertEqual((workspace / "lib/untracked.bin").read_bytes(), b"\x00sealed\xff")
             self.assertEqual(source.read_text(), "later-live-drift\n")
+
+    def test_repository_root_read_scope_materializes_all_tracked_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            repo = self.repository(base)
+            (repo / "src/ui").mkdir(parents=True)
+            (repo / "src/ui/view.ts").write_text("export const view = true;\n")
+            (repo / ".workflow").mkdir()
+            (repo / ".workflow/tracked-control.txt").write_text("must-not-copy\n")
+            subprocess.run(
+                ["git", "add", "-f", "src/ui/view.ts", ".workflow/tracked-control.txt"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(["git", "commit", "-qm", "add ui"], cwd=repo, check=True)
+            baseline = self.baseline(repo)
+            phase = prepare_isolated_phase(
+                repo / ".workflow/root-read",
+                repo,
+                self.plan(("api", ["src/api"])),
+                read_roots=(".",),
+                admission_baseline=baseline,
+            )
+            checkout = phase.tasks["api"].root
+            self.assertTrue((checkout / "src/api/value.txt").is_file())
+            self.assertTrue((checkout / "src/ui/view.ts").is_file())
+            self.assertTrue((checkout / "notes.txt").is_file())
+            self.assertFalse((checkout / ".git").exists())
+            self.assertFalse((checkout / ".workflow").exists())
+
+    def test_read_only_repository_snapshot_excludes_git_control_and_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = self.repository(Path(raw))
+            (repo / ".workflow").mkdir()
+            (repo / ".workflow/tracked-control.txt").write_text("must-not-copy\n")
+            subprocess.run(
+                ["git", "add", "-f", ".workflow/tracked-control.txt"],
+                cwd=repo,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-qm", "track control fixture"],
+                cwd=repo,
+                check=True,
+            )
+            control = repo / ".workflow/run"
+            auth = control / "runtime/codex-homes/verifier/auth.json"
+            auth.parent.mkdir(parents=True)
+            auth.write_text('{"tokens":{"access_token":"fixture-secret"}}\n')
+            snapshot = prepare_read_only_snapshot(control, repo, "002-verify", (".",))
+            self.assertTrue((snapshot / "src/api/value.txt").is_file())
+            self.assertTrue((snapshot / "notes.txt").is_file())
+            self.assertFalse((snapshot / ".git").exists())
+            self.assertFalse((snapshot / ".workflow").exists())
+            self.assertFalse(auth.is_relative_to(snapshot))
+            self.assertEqual(
+                prepare_read_only_snapshot(control, repo, "002-verify", (".",)),
+                snapshot,
+            )
+
+    def test_read_only_repository_snapshot_preserves_a_tracked_worktree_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = self.repository(Path(raw))
+            deleted = repo / "src/api/value.txt"
+            deleted.unlink()
+            control = repo / ".workflow/run"
+            snapshot = prepare_read_only_snapshot(control, repo, "002-verify", (".",))
+            self.assertFalse((snapshot / "src/api/value.txt").exists())
+            manifest = json.loads(
+                (control / "runtime/read-snapshots/002-verify/manifest.json").read_text()
+            )
+            self.assertNotIn("src/api/value.txt", manifest["files"])
+
+    def test_read_only_snapshot_rejects_a_source_swapped_to_symlink_before_open(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            repo = self.repository(base)
+            control = repo / ".workflow/run"
+            external = base / "auth.json"
+            external.write_text('{"token":"must-not-copy"}\n')
+            original = source_workspace._copy_read_snapshot_file_no_follow
+            swapped = {"done": False}
+
+            def swap_then_copy(source: Path, target: Path) -> int:
+                if source.as_posix().endswith("/src/api/value.txt") and not swapped["done"]:
+                    swapped["done"] = True
+                    source.unlink()
+                    source.symlink_to(external)
+                return original(source, target)
+
+            with (
+                mock.patch(
+                    "source_workspace._copy_read_snapshot_file_no_follow",
+                    side_effect=swap_then_copy,
+                ),
+                self.assertRaisesRegex(SourceWriteError, "unsafe"),
+            ):
+                prepare_read_only_snapshot(control, repo, "002-verify", (".",))
+            copied = control / "runtime/read-snapshots/002-verify/checkout/src/api/value.txt"
+            self.assertFalse(copied.exists())
 
     def test_snapshot_caps_fail_before_writer_workspace_launch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

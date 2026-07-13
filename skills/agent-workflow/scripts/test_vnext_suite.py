@@ -7,6 +7,7 @@ import sys
 import subprocess
 import tempfile
 import unittest
+import base64
 import hashlib
 import json
 from copy import deepcopy
@@ -478,7 +479,9 @@ class VNextProtocolTests(unittest.TestCase):
             workflow = load_fixture("valid/workflow.json")
             workflow["baseline_sha256"] = baseline_digest
             workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            workflow["admission"]["profile"] = "source_write"
             for name, capability in workflow["admission"]["capabilities"].items():
+                capability["status"] = "pass"
                 capability["evidence_sha256"] = put(
                     capability["evidence_ref"],
                     (name + "\n").encode(),
@@ -487,6 +490,8 @@ class VNextProtocolTests(unittest.TestCase):
 
             research_plan = load_fixture("valid/phase-plan.json")
             research_task = research_plan["tasks"][0]
+            research_task["work_mode"] = "write"
+            research_task["write_roots"] = ["src"]
             research_task["packet_sha256"] = put(research_task["packet_path"], b"research packet\n")
             research_task["input_sha256"] = {research_task["input_refs"][0]: baseline_digest}
             research_plan["predecessor_sha256"] = baseline_digest
@@ -523,6 +528,34 @@ class VNextProtocolTests(unittest.TestCase):
             research_result["evidence_sha256"] = {
                 research_result["evidence_refs"][0]: put(research_result["evidence_refs"][0], b"terminal\n")
             }
+            changed_payload = b"integrated\n"
+            changed_digest = "sha256:" + hashlib.sha256(changed_payload).hexdigest()
+            patch = {
+                "schema_version": "agent-workflow.bounded-patch.vnext.v1",
+                "phase_id": "001-research",
+                "target_before": {"src": "sha256:" + "1" * 64},
+                "entries": [
+                    {
+                        "path": "src/value.txt",
+                        "before_sha256": None,
+                        "before_mode": None,
+                        "after_sha256": changed_digest,
+                        "after_mode": 0o644,
+                        "after_base64": base64.b64encode(changed_payload).decode(),
+                    }
+                ],
+            }
+            patch_ref = "runtime/source-write/001-research/bounded-patch.json"
+            patch_digest = put_json(patch_ref, patch)
+            research_result["changed_paths"] = ["src/value.txt"]
+            research_result["checks"] = [
+                {
+                    "name": "host_changed_path_and_bounded_patch_audit",
+                    "exit_code": 0,
+                    "evidence_ref": patch_ref,
+                    "evidence_sha256": patch_digest,
+                }
+            ]
             research_result_ref = "phases/001-research/tasks/research-contract/result.json"
             research_result_digest = put_json(research_result_ref, research_result)
 
@@ -532,7 +565,93 @@ class VNextProtocolTests(unittest.TestCase):
             research_receipt["plan_sha256"] = research_plan_digest
             research_receipt["predecessor_sha256"] = baseline_digest
             research_receipt["task_result_sha256"] = {research_result_ref: research_result_digest}
+            research_receipt["integration"] = {
+                "mode": "isolated_exact_base",
+                "status": "applied",
+                "patch_ref": patch_ref,
+                "patch_sha256": patch_digest,
+                "target_before": {"src": "sha256:" + "1" * 64},
+                "target_after": {"src": "sha256:" + "2" * 64},
+            }
+            put_json(
+                "runtime/source-write/001-research/integration-terminal.json",
+                {
+                    "status": "applied",
+                    "phase_id": "001-research",
+                    "patch_ref": patch_ref,
+                    "patch_sha256": patch_digest,
+                    "target_before": research_receipt["integration"]["target_before"],
+                    "target_after": research_receipt["integration"]["target_after"],
+                },
+            )
             research_receipt_digest = put_json("phases/001-research/receipt.json", research_receipt)
+
+            stdout_ref = "evidence/host-validations/full-replay/00-focused.stdout"
+            stderr_ref = "evidence/host-validations/full-replay/00-focused.stderr"
+            stdout_digest = put(stdout_ref, b"tests passed\n")
+            stderr_digest = put(stderr_ref, b"")
+            repository_evidence = {
+                "head": "1" * 40,
+                "branch": "main",
+                "tracked_diff_sha256": "sha256:" + "3" * 64,
+                "untracked_manifest_sha256": "sha256:" + "4" * 64,
+            }
+            repository_evidence["source_state_sha256"] = (
+                "sha256:"
+                + hashlib.sha256(
+                    (json.dumps(repository_evidence, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                ).hexdigest()
+            )
+            host_validation_receipt = {
+                "schema_version": "agent-workflow.host-validation-receipt.v1",
+                "workflow_id": workflow["workflow_id"],
+                "authority_revision": 2,
+                "validation_id": "full-replay",
+                "status": "pass",
+                "spec_sha256": "sha256:" + "5" * 64,
+                "integration_receipt_ref": "phases/001-research/receipt.json",
+                "integration_receipt_sha256": research_receipt_digest,
+                "cwd": "/fixture/repo",
+                "environment": {"PATH": "/usr/bin:/bin", "CI": "1"},
+                "started_at": "2026-07-12T00:00:12Z",
+                "finished_at": "2026-07-12T00:00:15Z",
+                "repository_before": repository_evidence,
+                "repository_after": repository_evidence,
+                "repository_unchanged": True,
+                "commands": [
+                    {
+                        "id": "focused",
+                        "argv": ["/usr/bin/python3", "-m", "unittest", "focused"],
+                        "argv_sha256": "sha256:" + "0" * 64,
+                        "executable_sha256": "sha256:" + "6" * 64,
+                        "timeout_seconds": 300,
+                        "started_at": "2026-07-12T00:00:13Z",
+                        "finished_at": "2026-07-12T00:00:14Z",
+                        "elapsed_ms": 1000,
+                        "exit_code": 0,
+                        "timed_out": False,
+                        "stdout_ref": stdout_ref,
+                        "stdout_sha256": stdout_digest,
+                        "stderr_ref": stderr_ref,
+                        "stderr_sha256": stderr_digest,
+                    }
+                ],
+            }
+            host_validation_receipt["commands"][0]["argv_sha256"] = (
+                "sha256:"
+                + hashlib.sha256(
+                    (
+                        json.dumps(
+                            host_validation_receipt["commands"][0]["argv"],
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    ).encode()
+                ).hexdigest()
+            )
+            host_validation_ref = "evidence/host-validations/full-replay/receipt.json"
+            host_validation_digest = put_json(host_validation_ref, host_validation_receipt)
 
             instruction_ref = "amendments/instruction-0002.md"
             instruction_digest = put(instruction_ref, b"Verify the compatibility seam too.\n")
@@ -567,8 +686,13 @@ class VNextProtocolTests(unittest.TestCase):
                 "lineage_id": "lineage-independent-verifier",
                 "role": "top",
                 "packet_path": "phases/002-verify/tasks/independent-verifier/packet.md",
-                "input_refs": ["phases/001-research/receipt.json"],
-                "input_sha256": {"phases/001-research/receipt.json": research_receipt_digest},
+                "work_mode": "read",
+                "write_roots": [],
+                "input_refs": ["phases/001-research/receipt.json", host_validation_ref],
+                "input_sha256": {
+                    "phases/001-research/receipt.json": research_receipt_digest,
+                    host_validation_ref: host_validation_digest,
+                },
             })
             verify_task["packet_sha256"] = put(verify_task["packet_path"], b"verify packet\n")
             verify_plan_digest = put_json("phases/002-verify/plan.json", verify_plan)
@@ -612,6 +736,36 @@ class VNextProtocolTests(unittest.TestCase):
             verify_result["evidence_sha256"] = {
                 verify_result["evidence_refs"][0]: put(verify_result["evidence_refs"][0], b"verified\n")
             }
+            snapshot_checkout = root / "runtime/read-snapshots/002-verify/checkout/src"
+            snapshot_checkout.mkdir(parents=True)
+            (snapshot_checkout / "value.txt").write_bytes(changed_payload)
+            snapshot_files = {
+                "src/value.txt": {"sha256": changed_digest, "mode": 0o644}
+            }
+            snapshot_manifest_ref = "runtime/read-snapshots/002-verify/manifest.json"
+            snapshot_manifest = {
+                "schema_version": "agent-workflow.read-snapshot.vnext.v1",
+                "phase_id": "002-verify",
+                "repository": "/fixture/repo",
+                "repository_state": repository_evidence,
+                "repository_state_sha256": repository_evidence["source_state_sha256"],
+                "read_roots": ["src"],
+                "checkout_ref": "runtime/read-snapshots/002-verify/checkout",
+                "files": snapshot_files,
+                "files_sha256": "sha256:"
+                + hashlib.sha256(
+                    (json.dumps(snapshot_files, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                ).hexdigest(),
+            }
+            snapshot_manifest_digest = put_json(snapshot_manifest_ref, snapshot_manifest)
+            verify_result["checks"] = [
+                {
+                    "name": "host_read_snapshot_audit",
+                    "exit_code": 0,
+                    "evidence_ref": snapshot_manifest_ref,
+                    "evidence_sha256": snapshot_manifest_digest,
+                }
+            ]
             verification_decision = {
                 "schema_version": "agent-workflow.verification-decision.vnext.v1",
                 "workflow_id": workflow["workflow_id"],
@@ -623,15 +777,15 @@ class VNextProtocolTests(unittest.TestCase):
                     {
                         "criterion_id": "AC-1",
                         "status": "pass",
-                        "evidence_refs": verify_result["evidence_refs"],
+                        "evidence_refs": ["phases/001-research/receipt.json"],
                     }
                 ],
                 "findings": [],
                 "commands": [
                     {
-                        "command": "python3 -m unittest focused",
+                        "command": "/usr/bin/python3 -m unittest focused",
                         "exit_code": 0,
-                        "evidence_ref": verify_result["evidence_refs"][0],
+                        "evidence_ref": host_validation_ref,
                     }
                 ],
             }
@@ -652,6 +806,14 @@ class VNextProtocolTests(unittest.TestCase):
                 "predecessor_sha256": research_receipt_digest,
                 "task_result_refs": [verify_result_ref],
                 "task_result_sha256": {verify_result_ref: verify_result_digest},
+                "integration": {
+                    "mode": "none",
+                    "status": "not_applicable",
+                    "patch_ref": None,
+                    "patch_sha256": None,
+                    "target_before": {},
+                    "target_after": {},
+                },
             })
             verify_receipt_digest = put_json("phases/002-verify/receipt.json", verify_receipt)
 
@@ -680,6 +842,60 @@ class VNextProtocolTests(unittest.TestCase):
                 final=final,
             )
             self.assertEqual(candidate_replay["status"], "complete")
+            with self.assertRaisesRegex(ProtocolError, "latest authoritative integration"):
+                phase_protocol._validate_verification_decision(
+                    root,
+                    workflow,
+                    verify_plan,
+                    verify_result,
+                    final,
+                    "phases/000-stale/receipt.json",
+                    "sha256:" + "9" * 64,
+                    repository_evidence["source_state_sha256"],
+                )
+            with self.assertRaisesRegex(ProtocolError, "stale relative to the verifier snapshot"):
+                phase_protocol._validate_verification_decision(
+                    root,
+                    workflow,
+                    verify_plan,
+                    verify_result,
+                    final,
+                    "phases/001-research/receipt.json",
+                    research_receipt_digest,
+                    "sha256:" + "9" * 64,
+                )
+
+            untyped_command = deepcopy(verification_decision)
+            untyped_command["commands"][0]["evidence_ref"] = "phases/001-research/receipt.json"
+            untyped_output_digest = put_json(verify_result["output_ref"], untyped_command)
+            untyped_result = deepcopy(verify_result)
+            untyped_result["output_sha256"] = untyped_output_digest
+            untyped_result_digest = put_json(verify_result_ref, untyped_result)
+            untyped_receipt = deepcopy(verify_receipt)
+            untyped_receipt["task_result_sha256"] = {verify_result_ref: untyped_result_digest}
+            untyped_receipt_digest = put_json("phases/002-verify/receipt.json", untyped_receipt)
+            untyped_final = deepcopy(final)
+            untyped_final["phase_receipt_sha256"]["phases/002-verify/receipt.json"] = untyped_receipt_digest
+            untyped_final["verification_sha256"] = untyped_receipt_digest
+            with self.assertRaisesRegex(ProtocolError, "matching passed host-validation"):
+                phase_protocol.validate_replay_candidate(
+                    root,
+                    workflow_sha256=workflow_digest,
+                    final=untyped_final,
+                )
+            put_json(verify_result["output_ref"], verification_decision)
+            put_json(verify_result_ref, verify_result)
+            put_json("phases/002-verify/receipt.json", verify_receipt)
+
+            (snapshot_checkout / "value.txt").write_text("tampered\n")
+            with self.assertRaisesRegex(ProtocolError, "checkout bytes drifted"):
+                phase_protocol.validate_replay_candidate(
+                    root,
+                    workflow_sha256=workflow_digest,
+                    final=final,
+                )
+            (snapshot_checkout / "value.txt").write_bytes(changed_payload)
+
             final_path = workflow_runtime.seal_final(root, final)
             final_digest = "sha256:" + hashlib.sha256(final_path.read_bytes()).hexdigest()
 
@@ -845,8 +1061,9 @@ class VNextProtocolTests(unittest.TestCase):
         final = load_fixture("valid/final.json")
         receipt_ref = "phases/001-research/receipt.json"
         final.update({
-            "verification_ref": receipt_ref,
-            "verification_sha256": final["phase_receipt_sha256"][receipt_ref],
+            "status": "blocked",
+            "verification_ref": None,
+            "verification_sha256": None,
             "phase_receipt_refs": [receipt_ref],
             "phase_receipt_sha256": {receipt_ref: final["phase_receipt_sha256"][receipt_ref]},
             "lineage_claim_refs": ["lineages/lineage-contract/origin.json"],

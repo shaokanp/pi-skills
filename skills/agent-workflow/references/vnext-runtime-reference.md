@@ -31,6 +31,7 @@ python3 workflow_runtime.py probe-host-capabilities --root <workflow> --repo <re
 python3 workflow_runtime.py probe-source-write --root <workflow> --auth-source <auth.json>
 python3 workflow_runtime.py admit --root <workflow> --repo <repo> --workflow-source <workflow.json>
 python3 workflow_runtime.py pinned-runtime --root <workflow>
+python3 host_validation.py --root <workflow> --repo <repo> --spec-source <validation.json>
 python3 workflow_runtime.py run-phase --root <workflow> --repo <repo> --plan-source <phase.json> --auth-source <auth.json> --max-parallel <n>
 python3 workflow_runtime.py cancel --root <workflow> --authority-revision <revision>
 python3 workflow_runtime.py reconcile --root <workflow> --authority-revision <revision>
@@ -48,10 +49,28 @@ returns ready-to-copy workflow capability bindings backed by raw session,
 route, permission, token, denial, and focused-test evidence. A `source_write`
 workflow additionally runs `probe-source-write` and replaces only the returned
 `sandbox_isolation` binding with that live writer-probe binding. The two
-commands write only under the new workflow root; the repository root is
-read-only during the host probe, and the writer probe uses its own synthetic
-workspace. Evidence is bundle/Codex/root-bound, expires after 24 hours, and
-fails closed on tampering or route drift.
+commands write only under the new workflow root; the host probe reads an
+isolated source snapshot, and the writer probe uses its own synthetic workspace.
+Evidence is bundle/Codex/root-bound, expires after 24 hours, and
+fails closed on tampering or route drift. The host receipt binds the snapshot
+manifest ref and digest. Initial `admit` replays that existing create-once
+snapshot and requires its manifest to reproduce the current repository state;
+it cannot create a missing replacement. Later phases continue to replay the
+same immutable snapshot authority but do not compare it to source changes made
+by an already applied integration. The isolated snapshot path is never compared
+to or replaced by the live checkout path.
+Cross-directory source workflows that need a final repository-wide read-only
+verifier may use `.` as the single `admission.relevant_roots` value. This makes
+an isolated integrated-source snapshot readable; the live repository, `.git`,
+`.workflow`, Codex homes, credentials, and control artifacts remain outside the
+worker root. It does not make `.` a valid write root, artifact path, or
+control-plane path.
+The snapshot manifest binds file bytes and modes into each successful read task;
+the terminal fence and final replay both recheck the checkout against that
+manifest. A tracked worktree deletion is represented as an absent snapshot file,
+not treated as an infrastructure error. Source files are copied from no-follow
+file descriptors, and canonical repository state is checked before and after
+materialization so a pathname replacement cannot expose a foreign target.
 The host probe binds only portable Phase-runner capabilities: the OS terminal
 barrier plus each routed worker's supervisor request/terminal, exact command and
 sanitized environment, canonical rollout, route, permissions, and token usage.
@@ -72,6 +91,25 @@ commits `workflow.json`. Before every later lifecycle command, the host runs `pi
 absolute `runtime_path`; this preserves active-run behavior across a default-selector rollback or app restart. Missing,
 extra, symlinked, or digest-drifted pinned members return `blocked_incompatible_release`. There is no current-runtime or
 legacy-writer fallback.
+Project-level Git, tests, and builds run as host-owned validation after isolated
+integration; source-writer snapshots intentionally receive no `.git` or broad
+package-manager/toolchain capability. Their immutable logs may then be supplied
+to the independent read-only verifier. `host_validation.py` binds the applied
+integration receipt, exact resolved argv and executable digest, cwd, sanitized
+environment, stdout/stderr, exit, elapsed time, and before/after repository
+evidence into one create-once receipt. Repository evidence includes untracked
+file bytes and modes. Replay revalidates the full typed receipt and its exact
+spec; an independent verifier may claim a command only when its text and exit
+code match one passed host-validation command. General input refs cannot stand
+in for command evidence. A passing receipt must cover the entire sealed command
+list, and its integration ref must be the latest authoritative applied source
+phase before verification. The receipt's canonical source-state digest must also
+equal the final verifier snapshot state; an older pre-repair or pre-edit test run
+is stale evidence.
+Every Python entry point that may execute directly from the pinned directory
+disables bytecode emission before importing another bundle member. `__pycache__`
+is executable file-set drift and remains a hard failure; it is never ignored or
+cleaned in place.
 If admission crashes between member writes, the absence of committed `workflow.json` authorizes only exact-byte
 completion of that partial pin. Once `workflow.json` exists, missing, extra, or drifted members are incompatible
 authority and cannot be repaired in place.

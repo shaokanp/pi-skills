@@ -74,6 +74,7 @@ from recovery_runtime import (
     seal_amendment,
     seal_resume_brief,
 )
+from repository_state import RepositoryStateError, collect_repository_state
 from source_workspace import (
     DirtyOverlap,
     SourcePhase,
@@ -82,6 +83,8 @@ from source_workspace import (
     integrate_isolated_phase,
     load_isolated_phase,
     prepare_isolated_phase,
+    prepare_read_only_snapshot,
+    replay_read_only_snapshot,
     writer_profile_bytes,
 )
 from vnext_accounting import AccountingError, seal_accounting
@@ -139,7 +142,10 @@ _ISOLATED_WORKER_DEVELOPER_INSTRUCTIONS = (
     "skill file as a required input or acceptance criterion. Do not otherwise invoke skills, "
     "delegate, poll, inspect unrelated files, or perform unrequested lifecycle actions. "
     "Use tools only when the packet's acceptance criteria require them. Never commit, push, "
-    "publish, deploy, or modify production. Return only the declared output schema."
+    "publish, deploy, or modify production. A source-writer snapshot intentionally has no "
+    ".git directory or broad project toolchain capability; do not run repository-level Git, "
+    "test, or build commands there because the host owns diff, exact-base integration, and "
+    "post-integration validation. Return only the declared output schema."
 )
 
 
@@ -197,9 +203,11 @@ _RUNTIME_BUNDLE_FILES = (
     "app_resume_adapter.py",
     "artifact_store.py",
     "baseline_gate.py",
+    "host_validation.py",
     "phase_protocol.py",
     "process_supervisor.py",
     "recovery_runtime.py",
+    "repository_state.py",
     "source_workspace.py",
     "test_vnext_runtime.py",
     "vnext_accounting.py",
@@ -717,12 +725,42 @@ def _validate_typed_output(value: Any, schema: dict[str, Any], path: str = "$") 
         raise RuntimeFailure(f"items requires array output at {path}")
 
 
+def _host_capability_worker_root(
+    root: Path,
+    repository_root: Path | None,
+    relevant_roots: tuple[str, ...],
+    snapshot_evidence: dict[str, Any],
+    *,
+    require_live_state: bool,
+) -> Path:
+    """Revalidate and return the sealed read snapshot used by host probes."""
+
+    if repository_root is None:
+        raise RuntimeFailure("host capability admission requires a source repository")
+    try:
+        worker_root, manifest = replay_read_only_snapshot(
+            root,
+            repository_root,
+            "000-host-capability-probe",
+            relevant_roots,
+            snapshot_evidence,
+        )
+        if require_live_state:
+            current = collect_repository_state(repository_root)
+            if current != manifest["repository_state"]:
+                raise SourceWriteError("live repository state drifted from the host probe snapshot")
+        return worker_root
+    except (RepositoryStateError, SourceWriteError) as exc:
+        raise RuntimeFailure(f"host capability snapshot failed closed: {exc}") from exc
+
+
 def _validate_admission_inputs(
     root: Path,
     workflow: dict[str, Any],
     *,
     repository_root: Path | None = None,
     codex_binary: str | None = None,
+    require_host_snapshot_live_state: bool,
 ) -> None:
     """Bind dispatch to the sealed baseline, capabilities, and running bundle."""
 
@@ -866,10 +904,13 @@ def _validate_admission_inputs(
                     running_bundle=running_bundle,
                     codex_sha256=codex_sha256,
                     codex_version=codex_version,
-                    worker_root=(
-                        (repository_root or Path(root).resolve())
-                        / workflow["admission"]["relevant_roots"][0]
-                    ).resolve(strict=True),
+                    worker_root=_host_capability_worker_root(
+                        root,
+                        repository_root,
+                        tuple(workflow["admission"]["relevant_roots"]),
+                        receipt.get("snapshot_manifest"),
+                        require_live_state=require_host_snapshot_live_state,
+                    ),
                 )
                 validated_receipts.add(receipt_key)
             continue
@@ -1099,6 +1140,22 @@ def _validate_source_write_capability(
         or stderr_payload is None
     ):
         raise RuntimeFailure("source-write supervisor command or terminal evidence is insufficient")
+    messages = [
+        event.get("item", {}).get("text")
+        for event in _parse_jsonl(events_payload)
+        if event.get("type") == "item.completed"
+        and isinstance(event.get("item"), dict)
+        and event["item"].get("type") == "agent_message"
+        and isinstance(event["item"].get("text"), str)
+    ]
+    try:
+        live_output = json.loads(messages[-1]) if messages else None
+    except json.JSONDecodeError:
+        live_output = None
+    if (
+        live_output != {"answer": "ok"}
+    ):
+        raise RuntimeFailure("source-write live route evidence is insufficient")
     probe = evidence["deterministic_probe"]
     if not isinstance(probe, dict) or set(probe) != {"evidence_ref", "evidence_sha256"}:
         raise RuntimeFailure("source-write deterministic probe reference is invalid")
@@ -1226,6 +1283,7 @@ def _validate_host_capability_provenance(
         "observed_at",
         "producer",
         "relevant_root",
+        "snapshot_manifest",
         "execution",
         "sessions",
         "deterministic_denials",
@@ -1256,8 +1314,42 @@ def _validate_host_capability_provenance(
     age = _now() - observed_at.astimezone(timezone.utc)
     if age.total_seconds() < -300 or age > timedelta(hours=24):
         raise RuntimeFailure("host capability evidence is stale or from the future")
-    if Path(receipt["relevant_root"]).resolve(strict=True) != worker_root.resolve(strict=True):
+    expected_worker_root = os.fspath(worker_root.resolve(strict=True))
+    if not isinstance(receipt["relevant_root"], str) or receipt["relevant_root"] != expected_worker_root:
         raise RuntimeFailure("host capability relevant root drifted")
+    snapshot_evidence = receipt["snapshot_manifest"]
+    if not isinstance(snapshot_evidence, dict) or set(snapshot_evidence) != {
+        "evidence_ref",
+        "evidence_sha256",
+    }:
+        raise RuntimeFailure("host capability snapshot manifest evidence is invalid")
+    expected_snapshot_ref = "runtime/read-snapshots/000-host-capability-probe/manifest.json"
+    if snapshot_evidence["evidence_ref"] != expected_snapshot_ref:
+        raise RuntimeFailure("host capability snapshot manifest reference drifted")
+    try:
+        snapshot_payload = _read_artifact_bytes(
+            root,
+            snapshot_evidence["evidence_ref"],
+            snapshot_evidence["evidence_sha256"],
+        )
+        snapshot_manifest = json.loads(snapshot_payload)
+    except (ProtocolError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeFailure("host capability snapshot manifest is invalid") from exc
+    expected_checkout_ref = "runtime/read-snapshots/000-host-capability-probe/checkout"
+    try:
+        observed_checkout_root = os.fspath(
+            (Path(root) / expected_checkout_ref).resolve(strict=True)
+        )
+    except OSError as exc:
+        raise RuntimeFailure("host capability snapshot checkout is missing or unsafe") from exc
+    if (
+        not isinstance(snapshot_manifest, dict)
+        or snapshot_manifest.get("schema_version") != "agent-workflow.read-snapshot.vnext.v1"
+        or snapshot_manifest.get("phase_id") != "000-host-capability-probe"
+        or snapshot_manifest.get("checkout_ref") != expected_checkout_ref
+        or observed_checkout_root != expected_worker_root
+    ):
+        raise RuntimeFailure("host capability snapshot manifest authority drifted")
 
     execution = receipt["execution"]
     if not isinstance(execution, dict) or set(execution) != {
@@ -1980,11 +2072,18 @@ def _attest_worker_permissions(
             observed_kinds.append(f"codex_runtime:{resolved}")
         else:
             return "worker filesystem contains an unexpected readable path"
-    base_kinds = {"codex_arg0", "minimal", "worker_root"}
+    # Codex materializes arg0 lazily. A no-tool task may omit it; if present it
+    # must still be the single actor-owned path recognized above.
+    base_kinds = {"minimal", "worker_root"}
+    allowed_kinds = {*base_kinds, "codex_arg0"}
     if (
         not base_kinds.issubset(observed_kinds)
         or len(observed_kinds) != len(set(observed_kinds))
-        or any(kind not in base_kinds and not kind.startswith("codex_runtime:") for kind in observed_kinds)
+        or any(
+            kind not in allowed_kinds
+            and not kind.startswith("codex_runtime:")
+            for kind in observed_kinds
+        )
     ):
         return "worker filesystem allowlist is incomplete or duplicated"
     return None
@@ -3188,6 +3287,7 @@ def run_read_only_phase(
     reconciled_executions: dict[str, RawExecution] | None = None,
     source_phase: SourcePhase | None = None,
     runtime_task_overrides: dict[str, dict[str, Any]] | None = None,
+    read_snapshot_check: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one causally admitted Phase and return one terminal mechanical summary."""
 
@@ -3332,6 +3432,19 @@ def run_read_only_phase(
         "target_before": {},
         "target_after": {},
     }
+    if read_snapshot_check is not None:
+        if source_phase is not None:
+            raise RuntimeFailure("read snapshot evidence cannot accompany source integration")
+        for item in prepared:
+            if item.result["status"] != "completed":
+                continue
+            item.result["checks"] = [*item.result["checks"], dict(read_snapshot_check)]
+            try:
+                validate_contract("task-result", item.result)
+            except ProtocolError as exc:
+                raise RuntimeFailure(
+                    f"read snapshot produced an invalid task result for {item.task_id}: {exc}"
+                ) from exc
     if source_phase is not None:
         completed_task_ids = {
             item.task_id for item in prepared if item.result["status"] == "completed"
@@ -3777,6 +3890,7 @@ def _admit_command(
         workflow,
         repository_root=repository_root,
         codex_binary=os.fspath(codex_path),
+        require_host_snapshot_live_state=True,
     )
     pinned_runtime = _seal_runtime_bundle(root)
     path = _create_or_verify_json(root, "workflow.json", workflow)
@@ -3808,6 +3922,7 @@ def _run_phase_command(
         workflow,
         repository_root=repository_root,
         codex_binary=os.fspath(codex_path),
+        require_host_snapshot_live_state=False,
     )
     source_writing = any(task["work_mode"] == "write" for task in plan["tasks"])
     if source_writing and any(task["work_mode"] != "write" for task in plan["tasks"]):
@@ -3832,6 +3947,7 @@ def _run_phase_command(
     codex_homes: list[Path] = []
     runtime_overrides: dict[str, dict[str, Any]] = {}
     source_phase: SourcePhase | None = None
+    read_snapshot_check: dict[str, Any] | None = None
     try:
         if source_writing:
             try:
@@ -3880,11 +3996,24 @@ def _run_phase_command(
             codex_home = codex_homes[0]
         else:
             relevant_roots = workflow["admission"]["relevant_roots"]
-            if len(relevant_roots) != 1:
-                raise RuntimeFailure("read-only Phase requires exactly one worker-readable root")
-            worker_root = (repository_root / relevant_roots[0]).resolve(strict=True)
-            if not worker_root.is_relative_to(repository_root) or not worker_root.is_dir():
-                raise RuntimeFailure("worker-readable root escapes the repository")
+            try:
+                worker_root = prepare_read_only_snapshot(
+                    root,
+                    repository_root,
+                    plan["phase_id"],
+                    tuple(relevant_roots),
+                )
+            except SourceWriteError as exc:
+                raise RuntimeFailure(f"read-only snapshot failed closed: {exc}") from exc
+            snapshot_manifest_ref = f"runtime/read-snapshots/{plan['phase_id']}/manifest.json"
+            snapshot_manifest_path = root / snapshot_manifest_ref
+            snapshot_manifest_sha256 = _digest(snapshot_manifest_path.read_bytes())
+            read_snapshot_check = {
+                "name": "host_read_snapshot_audit",
+                "exit_code": 0,
+                "evidence_ref": snapshot_manifest_ref,
+                "evidence_sha256": snapshot_manifest_sha256,
+            }
             for task in plan["tasks"]:
                 binding = resume_bindings[task["task_id"]]
                 owner = (
@@ -3920,6 +4049,7 @@ def _run_phase_command(
                 workflow,
                 repository_root=repository_root,
                 codex_binary=os.fspath(codex_path),
+                require_host_snapshot_live_state=False,
             )
             try:
                 prepare_phase_authority(
@@ -3930,6 +4060,19 @@ def _run_phase_command(
                 )
             except RecoveryError as exc:
                 raise RuntimeFailure(f"phase authority fence drifted: {exc}") from exc
+            if read_snapshot_check is not None:
+                try:
+                    prepare_read_only_snapshot(
+                        root,
+                        repository_root,
+                        plan["phase_id"],
+                        tuple(workflow["admission"]["relevant_roots"]),
+                    )
+                except SourceWriteError as exc:
+                    raise RuntimeFailure(f"read snapshot terminal fence drifted: {exc}") from exc
+                manifest_path = root / read_snapshot_check["evidence_ref"]
+                if _digest(manifest_path.read_bytes()) != read_snapshot_check["evidence_sha256"]:
+                    raise RuntimeFailure("read snapshot terminal manifest digest drifted")
 
         summary = run_read_only_phase(
             root,
@@ -3939,6 +4082,7 @@ def _run_phase_command(
             terminal_fence=terminal_fence,
             source_phase=source_phase,
             runtime_task_overrides=runtime_overrides,
+            read_snapshot_check=read_snapshot_check,
         )
         summary["resource_admission"] = resource_admission
     finally:
@@ -4169,11 +4313,27 @@ def _probe_host_capabilities_command(
     if _repository_root_for(root) != repository:
         raise RuntimeFailure("host capability workflow root belongs to another repository")
     relative = Path(relevant_root)
-    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+    if (
+        relevant_root != "."
+        and (
+            relative.is_absolute()
+            or not relative.parts
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        )
+    ):
         raise RuntimeFailure("host capability relevant root must be a safe relative path")
-    worker_root = (repository / relative).resolve(strict=True)
-    if not worker_root.is_relative_to(repository):
+    live_relevant_root = (repository / relative).resolve(strict=True)
+    if not live_relevant_root.is_relative_to(repository):
         raise RuntimeFailure("host capability relevant root escapes repository")
+    try:
+        worker_root = prepare_read_only_snapshot(
+            root,
+            repository,
+            "000-host-capability-probe",
+            (relevant_root,),
+        )
+    except SourceWriteError as exc:
+        raise RuntimeFailure(f"host capability snapshot failed closed: {exc}") from exc
     summary_ref = "evidence/host-capability-summary.json"
     receipt_ref = "evidence/host-capability-receipt.json"
     codex_path, codex_sha256, codex_version = _codex_identity(codex_binary)
@@ -4375,6 +4535,17 @@ def _probe_host_capabilities_command(
             name: "unavailable" if name == "sandbox_isolation" else "pass"
             for name in CAPABILITY_NAMES
         }
+        try:
+            prepare_read_only_snapshot(
+                root,
+                repository,
+                "000-host-capability-probe",
+                (relevant_root,),
+            )
+        except SourceWriteError as exc:
+            raise RuntimeFailure(f"host capability snapshot terminal fence drifted: {exc}") from exc
+        snapshot_manifest_ref = "runtime/read-snapshots/000-host-capability-probe/manifest.json"
+        snapshot_manifest_path = root / snapshot_manifest_ref
         observed_at = _now()
         receipt = {
             "schema_version": "agent-workflow.host-capability-receipt.v1",
@@ -4386,6 +4557,10 @@ def _probe_host_capabilities_command(
                 "codex_binary_sha256": codex_sha256,
             },
             "relevant_root": os.fspath(worker_root),
+            "snapshot_manifest": {
+                "evidence_ref": snapshot_manifest_ref,
+                "evidence_sha256": _digest(snapshot_manifest_path.read_bytes()),
+            },
             "execution": {
                 "started_at": _timestamp(started_at),
                 "finished_at": _timestamp(finished_at),

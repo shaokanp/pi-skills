@@ -14,6 +14,31 @@
 - Bound capability probes to exact argv, supervisor logs, canonical rollout
   context, one crash-recovery slot, and the sealed Codex runtime executable
   read required by current macOS permission profiles.
+- Kept linked-worktree fixture Git operations isolated while binding the final
+  public-safety check to the exact commit index.
+- Prevented directly executed pinned Python entry points from creating
+  `__pycache__` inside the immutable runtime bundle.
+- Added repository-root read scope for cross-directory implementation and
+  verification while keeping project-level Git, tests, and builds in the
+  host-owned post-integration validation boundary.
+- Materialized repository-wide readers from an integrated-source snapshot that
+  excludes `.git`, `.workflow`, credentials, and control artifacts.
+- Applied the same snapshot boundary to fresh host capability probes, preserved
+  tracked deletions, and bound snapshot bytes/modes through terminal and final
+  replay. Admission now revalidates that exact sealed snapshot against current
+  repository state instead of comparing its isolated path to the live checkout;
+  later phases replay its receipt-bound manifest without rejecting legitimate
+  source changes from an already applied integration.
+- Copied snapshot sources through no-follow descriptors and required one
+  canonical source-state digest across host validation and final verification,
+  preventing stale tests or pathname replacement from crossing the boundary.
+- Added create-once host validation receipts binding integration, exact commands,
+  sanitized environment, logs, exits, elapsed time, and repository stability;
+  replay now rejects changed specs, forged receipts, and untracked content/mode
+  drift. Passing receipts cover the complete command list, and independent
+  command claims must match a typed receipt for the latest applied integration.
+- Accepted Codex's lazy omission of its actor-owned `arg0` wrapper for no-tool
+  probes while continuing to reject duplicate or foreign runtime read paths.
 
 - Added a portable/strict-local session doctor, fail-closed new-skill scaffold,
   bilingual guide checks, and deterministic registry/changelog version markers.
