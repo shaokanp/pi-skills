@@ -1170,11 +1170,10 @@ def validate_contract(kind: str, value: Any) -> dict[str, Any]:
     return value
 
 
-def _read_artifact_bytes(root: Path, relative_path: str, expected_sha256: str) -> bytes:
-    """Read one artifact without following links and verify its exact bytes."""
+def _read_artifact_bytes_no_follow(root: Path, relative_path: str) -> bytes:
+    """Read one bounded regular artifact without following any path link."""
 
     _relative_path(relative_path, "replay artifact path")
-    _sha256(expected_sha256, "replay artifact sha256")
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise ProtocolError("secure no-follow artifact replay is unavailable on this host")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -1208,6 +1207,14 @@ def _read_artifact_bytes(root: Path, relative_path: str, expected_sha256: str) -
     finally:
         for descriptor in reversed(fds):
             os.close(descriptor)
+    return payload
+
+
+def _read_artifact_bytes(root: Path, relative_path: str, expected_sha256: str) -> bytes:
+    """Read one artifact without following links and verify its exact bytes."""
+
+    _sha256(expected_sha256, "replay artifact sha256")
+    payload = _read_artifact_bytes_no_follow(root, relative_path)
     actual = "sha256:" + hashlib.sha256(payload).hexdigest()
     if actual != expected_sha256:
         raise ProtocolError(f"replay artifact digest mismatch: {relative_path}")
@@ -1303,11 +1310,9 @@ def _validate_source_patch_replay(
     if patch_paths != result_paths:
         raise ProtocolError("bounded patch paths do not match task changed_paths")
     if integration["status"] == "applied":
-        terminal_path = root / f"runtime/source-write/{plan['phase_id']}/integration-terminal.json"
-        if terminal_path.is_symlink() or not terminal_path.is_file():
-            raise ProtocolError("applied source phase lacks integration terminal evidence")
+        terminal_ref = f"runtime/source-write/{plan['phase_id']}/integration-terminal.json"
         try:
-            terminal = json.loads(terminal_path.read_bytes())
+            terminal = json.loads(_read_artifact_bytes_no_follow(root, terminal_ref))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ProtocolError("integration terminal evidence is invalid JSON") from exc
         if (

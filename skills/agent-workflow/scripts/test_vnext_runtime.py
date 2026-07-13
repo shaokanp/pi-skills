@@ -32,6 +32,8 @@ import baseline_gate
 import workflow_runtime
 import host_validation
 from source_workspace import (
+    IntegrationConflict,
+    SourceWriteError,
     attest_writer_permissions,
     load_isolated_phase,
     prepare_read_only_snapshot,
@@ -68,6 +70,7 @@ from workflow_runtime import (
     _seal_deadlines,
     _seal_generation_claim,
     _scrub_stale_codex_auth,
+    _validate_output_schema_contract,
     _validate_typed_output,
     _validate_admission_inputs,
     _validate_host_capability_provenance,
@@ -1378,6 +1381,231 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             _validate_typed_output(False, {"const": 0})
         _validate_typed_output(1.0, {"enum": [1]})
 
+    def test_output_schema_preflight_rejects_provider_invalid_const_and_enum(self) -> None:
+        for schema in (
+            {
+                "type": "object",
+                "properties": {"schema_version": {"const": "v1"}},
+                "required": ["schema_version"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"decision": {"enum": ["pass", "blocked"]}},
+                "required": ["decision"],
+                "additionalProperties": False,
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeFailure, "explicit supported type"):
+                _validate_output_schema_contract(schema)
+        _validate_output_schema_contract(
+            {
+                "type": "object",
+                "properties": {
+                    "schema_version": {"type": "string", "const": "v1"},
+                    "decision": {"type": "string", "enum": ["pass", "blocked"]},
+                },
+                "required": ["schema_version", "decision"],
+                "additionalProperties": False,
+            }
+        )
+
+    def test_output_schema_preflight_accepts_supported_anyof_and_nullable_types(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "integer"},
+                    ]
+                },
+                "note": {"type": ["string", "null"]},
+            },
+            "required": ["value", "note"],
+            "additionalProperties": False,
+        }
+        _validate_output_schema_contract(schema)
+        _validate_typed_output({"value": "supported", "note": None}, schema)
+        _validate_typed_output({"value": 7, "note": "also supported"}, schema)
+
+    def test_output_schema_preflight_rejects_more_than_five_thousand_properties(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                f"field_{index}": {"type": "string"}
+                for index in range(5_001)
+            },
+            "required": [f"field_{index}" for index in range(5_001)],
+            "additionalProperties": False,
+        }
+        with self.assertRaisesRegex(RuntimeFailure, "property count"):
+            _validate_output_schema_contract(schema)
+
+    def test_output_schema_preflight_rejects_more_than_ten_object_levels(self) -> None:
+        leaf: dict[str, object] = {"type": "string"}
+        for index in range(10, 0, -1):
+            leaf = {
+                "type": "object",
+                "properties": {f"level_{index}": leaf},
+                "required": [f"level_{index}"],
+                "additionalProperties": False,
+            }
+        _validate_output_schema_contract(leaf)
+        too_deep = {
+            "type": "object",
+            "properties": {"level_0": leaf},
+            "required": ["level_0"],
+            "additionalProperties": False,
+        }
+        with self.assertRaisesRegex(RuntimeFailure, "nesting depth"):
+            _validate_output_schema_contract(too_deep)
+
+    def test_invalid_output_schema_is_rejected_before_phase_authority_or_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            task = plan["tasks"][0]
+            schema_ref = "schemas/provider-invalid.json"
+            schema_payload = (
+                json.dumps(
+                    {
+                        "type": "object",
+                        "properties": {"schema_version": {"const": "v1"}},
+                        "required": ["schema_version"],
+                        "additionalProperties": False,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+            (root / schema_ref).write_bytes(schema_payload)
+            packet_path = root / task["packet_path"]
+            packet = json.loads(packet_path.read_bytes())
+            packet["output_schema_ref"] = schema_ref
+            packet["output_schema_sha256"] = digest(schema_payload)
+            packet_payload = (
+                json.dumps(packet, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            packet_path.write_bytes(packet_payload)
+            task["packet_sha256"] = digest(packet_payload)
+            launched = False
+
+            def execute(_task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                nonlocal launched
+                launched = True
+                raise AssertionError("invalid schema must not launch an actor")
+
+            with self.assertRaisesRegex(RuntimeFailure, "explicit supported type"):
+                run_read_only_phase(root, plan, execute, max_parallel=1)
+            self.assertFalse(launched)
+            self.assertFalse((root / "phases/001-research/plan.json").exists())
+            self.assertFalse((root / "generations/claims").exists())
+
+    def test_non_json_schema_constants_are_rejected_before_actor_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            plan = self.build_run(root, task_count=1)
+            task = plan["tasks"][0]
+            schema_ref = "schemas/non-json-number.json"
+            schema_payload = (
+                json.dumps(
+                    {
+                        "type": "object",
+                        "properties": {
+                            "score": {"type": "number", "const": float("inf")}
+                        },
+                        "required": ["score"],
+                        "additionalProperties": False,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode()
+            (root / schema_ref).write_bytes(schema_payload)
+            packet_path = root / task["packet_path"]
+            packet = json.loads(packet_path.read_bytes())
+            packet["output_schema_ref"] = schema_ref
+            packet["output_schema_sha256"] = digest(schema_payload)
+            packet_payload = (
+                json.dumps(packet, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            packet_path.write_bytes(packet_payload)
+            task["packet_sha256"] = digest(packet_payload)
+            launched = False
+
+            def execute(_task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                nonlocal launched
+                launched = True
+                raise AssertionError("non-JSON schema must not launch an actor")
+
+            with self.assertRaisesRegex(RuntimeFailure, "invalid output schema"):
+                run_read_only_phase(root, plan, execute, max_parallel=1)
+            self.assertFalse(launched)
+            self.assertFalse((root / "phases/001-research/plan.json").exists())
+
+    def test_source_dependency_drift_is_rechecked_immediately_before_actor_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
+            (repository / "src").mkdir()
+            (repository / "lib").mkdir()
+            (repository / "src/value.txt").write_text("base\n")
+            dependency = repository / "lib/context.txt"
+            dependency.write_text("sealed\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            baseline = self.source_baseline(repository)
+            baseline_payload = baseline_gate._canonical(baseline)
+            root = repository / ".workflow/run"
+            root.mkdir(parents=True)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            workflow["admission"]["profile"] = "source_write"
+            workflow["admission"]["capabilities"]["sandbox_isolation"]["status"] = "pass"
+            workflow["baseline_sha256"] = digest(baseline_payload)
+            workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            (root / workflow["baseline_ref"]).write_bytes(baseline_payload)
+            (root / "workflow.json").write_text(
+                json.dumps(workflow, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            task = plan["tasks"][0]
+            task["work_mode"] = "write"
+            task["write_roots"] = ["src"]
+            task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
+            plan["predecessor_sha256"] = digest(baseline_payload)
+            self.bind_writer_schema(root, task)
+            phase = prepare_isolated_phase(
+                root,
+                repository,
+                plan,
+                read_roots=("src", "lib"),
+                admission_baseline=baseline,
+            )
+            dependency.write_text("external-before-launch\n")
+            launched = False
+
+            def execute(_task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                nonlocal launched
+                launched = True
+                raise AssertionError("drifted source phase must not launch an actor")
+
+            with self.assertRaisesRegex(RuntimeFailure, "external drift"):
+                run_read_only_phase(
+                    root,
+                    plan,
+                    execute,
+                    max_parallel=1,
+                    source_phase=phase,
+                )
+            self.assertFalse(launched)
+            self.assertFalse((root / "phases/001-research/plan.json").exists())
+
     def test_permission_attestation_rejects_every_extra_read_or_write(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw).resolve()
@@ -1589,6 +1817,31 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             ],
         }
         return baseline_gate.collect_baseline(repository, parent_summary=parent)
+
+    def bind_writer_schema(self, root: Path, task: dict[str, object]) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "changed_paths": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["answer", "changed_paths"],
+            "additionalProperties": False,
+        }
+        schema_payload = (
+            json.dumps(schema, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        schema_ref = "schemas/writer-output.json"
+        (root / schema_ref).write_bytes(schema_payload)
+        packet_path = root / task["packet_path"]
+        packet = json.loads(packet_path.read_bytes())
+        packet["output_schema_ref"] = schema_ref
+        packet["output_schema_sha256"] = digest(schema_payload)
+        packet_payload = (
+            json.dumps(packet, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        packet_path.write_bytes(packet_payload)
+        task["packet_sha256"] = digest(packet_payload)
 
     def test_seal_final_validates_before_create_once_publication(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -2250,6 +2503,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             for task, write_root in zip(plan["tasks"], ("src/api", "src/web"), strict=True):
                 task["work_mode"] = "write"
                 task["write_roots"] = [write_root]
+                self.bind_writer_schema(root, task)
             plan["predecessor_sha256"] = digest(baseline_payload)
             for task in plan["tasks"]:
                 task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
@@ -2270,11 +2524,15 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
                 target.write_text(f"{task['task_id']}-v2\n")
                 session = f"writer-{task['task_id']}"
                 model = "gpt-5.6-terra" if task["role"] == "worker" else "gpt-5.6-sol"
+                output = {
+                    "answer": "written",
+                    "changed_paths": [f"{task['write_roots'][0]}/value.txt"],
+                }
                 return RawExecution(
                     exit_code=0,
                     events=[
                         {"type": "thread.started", "thread_id": session},
-                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"written"}'}},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(output)}},
                         {"type": "turn.completed", "usage": {"input_tokens": 2, "output_tokens": 1}},
                     ],
                     stderr="",
@@ -2334,6 +2592,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             (root / "workflow.json").write_text(json.dumps(workflow, sort_keys=True, separators=(",", ":")) + "\n")
             plan["tasks"][0]["work_mode"] = "write"
             plan["tasks"][0]["write_roots"] = ["src"]
+            self.bind_writer_schema(root, plan["tasks"][0])
             plan["predecessor_sha256"] = digest(baseline_payload)
             for task in plan["tasks"]:
                 task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
@@ -2352,7 +2611,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
                     exit_code=0,
                     events=[
                         {"type": "thread.started", "thread_id": "writer-drift"},
-                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"written"}'}},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"answer": "written", "changed_paths": ["src/value.txt"]})}},
                         {"type": "turn.completed", "usage": {"input_tokens": 2, "output_tokens": 1}},
                     ],
                     stderr="",
@@ -2405,6 +2664,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             task = plan["tasks"][0]
             task["work_mode"] = "write"
             task["write_roots"] = ["src"]
+            self.bind_writer_schema(root, task)
             task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
             plan["predecessor_sha256"] = digest(baseline_payload)
             source_phase = prepare_isolated_phase(
@@ -2417,7 +2677,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
                 exit_code=0,
                 events=[
                     {"type": "thread.started", "thread_id": "writer-reconcile"},
-                    {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"written"}'}},
+                    {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"answer": "written", "changed_paths": ["src/value.txt"]})}},
                     {"type": "turn.completed", "usage": {"input_tokens": 2, "output_tokens": 1}},
                 ],
                 stderr="",
@@ -2518,6 +2778,9 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
 
             def raw_execution(task: dict[str, object], text: str) -> RawExecution:
                 session_id = f"session-{task['task_id']}"
+                output: dict[str, object] = {"answer": text}
+                if task["work_mode"] == "write":
+                    output["changed_paths"] = ["src/value.txt"]
                 return RawExecution(
                     exit_code=0,
                     events=[
@@ -2526,7 +2789,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
                             "type": "item.completed",
                             "item": {
                                 "type": "agent_message",
-                                "text": json.dumps({"answer": text}),
+                                "text": json.dumps(output),
                             },
                         },
                         {
@@ -2580,6 +2843,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             packet_path.parent.mkdir(parents=True)
             packet_path.write_bytes(packet_payload)
             task["packet_sha256"] = digest(packet_payload)
+            self.bind_writer_schema(root, task)
             seal_resume_brief(root, workflow, second["generation_id"])
 
             source_phase = prepare_isolated_phase(
@@ -2587,6 +2851,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
                 repository,
                 second,
                 admission_baseline=baseline,
+                predecessor_sha256=second["predecessor_sha256"],
             )
             (source_phase.tasks["write-followup"].root / "src/value.txt").write_text(
                 "worker\n"
@@ -2610,6 +2875,345 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
                 (root / "phases/002-write/tasks/write-followup/result.json").read_text()
             )
             self.assertEqual(result["changed_paths"], ["src/value.txt"])
+
+    def test_cumulative_source_head_replays_cross_anchor_and_allows_same_anchor_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
+            (repository / "server").mkdir()
+            (repository / "src").mkdir()
+            (repository / "server/contract.txt").write_text("server-v1\n")
+            (repository / "src/types.txt").write_text("types-v1\n")
+            (repository / "src/App.txt").write_text("app-v1\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            baseline = self.source_baseline(repository)
+            baseline_payload = baseline_gate._canonical(baseline)
+            root = repository / ".workflow/run"
+            root.mkdir(parents=True)
+            first = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            workflow["success_criteria"].extend(
+                [
+                    {"id": "AC-2", "description": "UI types consume the server contract."},
+                    {"id": "AC-3", "description": "A later UI repair may reuse the src anchor."},
+                ]
+            )
+            workflow["admission"]["profile"] = "source_write"
+            workflow["admission"]["capabilities"]["sandbox_isolation"]["status"] = "pass"
+            workflow["admission"]["relevant_roots"] = ["."]
+            workflow["baseline_sha256"] = digest(baseline_payload)
+            workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            (root / workflow["baseline_ref"]).write_bytes(baseline_payload)
+            (root / "workflow.json").write_text(
+                json.dumps(workflow, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            first_task = first["tasks"][0]
+            first_task["work_mode"] = "write"
+            first_task["write_roots"] = ["server/contract.txt"]
+            first_task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
+            first["predecessor_sha256"] = digest(baseline_payload)
+            self.bind_writer_schema(root, first_task)
+            first_phase = prepare_isolated_phase(
+                root,
+                repository,
+                first,
+                read_roots=(".",),
+                admission_baseline=baseline,
+                predecessor_sha256=first["predecessor_sha256"],
+            )
+
+            def execution(task: dict[str, object], path: str, value: str) -> RawExecution:
+                target = Path(task["_runtime_worker_root"]) / path
+                target.write_text(value)
+                session = f"session-{task['task_id']}"
+                output = {"answer": "written", "changed_paths": [path]}
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": session},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(output)}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+                    ],
+                    stderr="",
+                    turn_context={"model": "gpt-5.6-terra", "effort": "xhigh", "session_id": session},
+                )
+
+            first_summary = run_read_only_phase(
+                root,
+                first,
+                lambda task, _packet: execution(task, "server/contract.txt", "server-v2\n"),
+                max_parallel=1,
+                source_phase=first_phase,
+                runtime_task_overrides={
+                    first_task["task_id"]: {"_runtime_worker_root": os.fspath(first_phase.tasks[first_task["task_id"]].root)}
+                },
+            )
+            first_receipt = root / first_summary["receipt_ref"]
+            self.assertEqual((repository / "server/contract.txt").read_text(), "server-v2\n")
+
+            first_receipt_value = json.loads(first_receipt.read_bytes())
+            first_results = {
+                first_task["task_id"]: json.loads(
+                    (root / first_receipt_value["task_result_refs"][0]).read_bytes()
+                )
+            }
+            runtime_path = root / "runtime"
+            foreign_runtime_path = root / "foreign-runtime"
+            runtime_path.rename(foreign_runtime_path)
+            runtime_path.symlink_to(foreign_runtime_path, target_is_directory=True)
+            with self.assertRaisesRegex(ProtocolError, "artifact"):
+                _validate_source_patch_replay(root, first, first_receipt_value, first_results)
+            runtime_path.unlink()
+            foreign_runtime_path.rename(runtime_path)
+
+            claim_path = root / first_receipt_value["generation_claim_ref"]
+            original_claim_payload = claim_path.read_bytes()
+            forged_claim = json.loads(original_claim_payload)
+            forged_claim["phase_id"] = "forged-authority"
+            claim_path.write_text(
+                json.dumps(forged_claim, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+
+            second = deepcopy(first)
+            second["phase_id"] = "002-ui"
+            second["caused_by"] = [first["phase_id"]]
+            second["predecessor_sha256"] = digest(first_receipt.read_bytes())
+            second_task = second["tasks"][0]
+            second_task.update(
+                {
+                    "task_id": "ui-types",
+                    "lineage_id": "lineage-ui-types",
+                    "criterion_id": "AC-2",
+                    "write_roots": ["src/types.txt"],
+                    "packet_path": "phases/002-ui/tasks/ui-types/packet.json",
+                    "input_refs": [first_summary["receipt_ref"]],
+                    "input_sha256": {first_summary["receipt_ref"]: digest(first_receipt.read_bytes())},
+                }
+            )
+            packet = {
+                "schema_version": "agent-workflow.task-packet.vnext.v1",
+                "prompt": "Update UI types from the integrated server contract.",
+                "output_schema_ref": "schemas/writer-output.json",
+                "output_schema_sha256": digest((root / "schemas/writer-output.json").read_bytes()),
+            }
+            packet_payload = (json.dumps(packet, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            packet_path = root / second_task["packet_path"]
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_bytes(packet_payload)
+            second_task["packet_sha256"] = digest(packet_payload)
+            with self.assertRaisesRegex(SourceWriteError, "generation claim"):
+                prepare_isolated_phase(
+                    root,
+                    repository,
+                    second,
+                    read_roots=(".",),
+                    admission_baseline=baseline,
+                    predecessor_sha256=second["predecessor_sha256"],
+                )
+            claim_path.write_bytes(original_claim_payload)
+
+            phases_path = root / "phases"
+            real_phases_path = root / "foreign-phases"
+            phases_path.rename(real_phases_path)
+            phases_path.symlink_to(real_phases_path, target_is_directory=True)
+            with self.assertRaisesRegex(SourceWriteError, "unsafe"):
+                prepare_isolated_phase(
+                    root,
+                    repository,
+                    second,
+                    read_roots=(".",),
+                    admission_baseline=baseline,
+                    predecessor_sha256=second["predecessor_sha256"],
+                )
+            phases_path.unlink()
+            real_phases_path.rename(phases_path)
+
+            (repository / "server/contract.txt").write_text("external-cross-anchor\n")
+            with self.assertRaisesRegex(IntegrationConflict, "external drift"):
+                prepare_isolated_phase(
+                    root,
+                    repository,
+                    second,
+                    read_roots=(".",),
+                    admission_baseline=baseline,
+                    predecessor_sha256=second["predecessor_sha256"],
+                )
+            shutil.rmtree(root / "runtime/source-workspaces/002-ui")
+            (repository / "server/contract.txt").write_text("server-v2\n")
+            second_phase = prepare_isolated_phase(
+                root,
+                repository,
+                second,
+                read_roots=(".",),
+                admission_baseline=baseline,
+                predecessor_sha256=second["predecessor_sha256"],
+            )
+            second_workspace = second_phase.tasks["ui-types"].root
+            self.assertEqual((second_workspace / "server/contract.txt").read_text(), "server-v2\n")
+            second_summary = run_read_only_phase(
+                root,
+                second,
+                lambda task, _packet: execution(task, "src/types.txt", "types-v2\n"),
+                max_parallel=1,
+                source_phase=second_phase,
+                runtime_task_overrides={"ui-types": {"_runtime_worker_root": os.fspath(second_workspace)}},
+            )
+            second_receipt = root / second_summary["receipt_ref"]
+            self.assertEqual((repository / "src/types.txt").read_text(), "types-v2\n")
+
+            third = deepcopy(second)
+            third["phase_id"] = "003-ui-repair"
+            third["caused_by"] = [second["phase_id"]]
+            third["predecessor_sha256"] = digest(second_receipt.read_bytes())
+            third_task = third["tasks"][0]
+            third_task.update(
+                {
+                    "task_id": "ui-repair",
+                    "lineage_id": "lineage-ui-repair",
+                    "criterion_id": "AC-3",
+                    "write_roots": ["src/App.txt"],
+                    "packet_path": "phases/003-ui-repair/tasks/ui-repair/packet.json",
+                    "input_refs": [second_summary["receipt_ref"]],
+                    "input_sha256": {second_summary["receipt_ref"]: digest(second_receipt.read_bytes())},
+                }
+            )
+            third_packet_path = root / third_task["packet_path"]
+            third_packet_path.parent.mkdir(parents=True)
+            third_packet_path.write_bytes(packet_payload)
+            third_task["packet_sha256"] = digest(packet_payload)
+            third_phase = prepare_isolated_phase(
+                root,
+                repository,
+                third,
+                read_roots=(".",),
+                admission_baseline=baseline,
+                predecessor_sha256=third["predecessor_sha256"],
+            )
+            self.assertEqual((third_phase.tasks["ui-repair"].root / "src/types.txt").read_text(), "types-v2\n")
+            third_workspace = third_phase.tasks["ui-repair"].root
+            third_summary = run_read_only_phase(
+                root,
+                third,
+                lambda task, _packet: execution(task, "src/App.txt", "app-v2\n"),
+                max_parallel=1,
+                source_phase=third_phase,
+                runtime_task_overrides={
+                    "ui-repair": {"_runtime_worker_root": os.fspath(third_workspace)}
+                },
+            )
+            third_receipt = root / third_summary["receipt_ref"]
+            self.assertEqual((repository / "src/types.txt").read_text(), "types-v2\n")
+            self.assertEqual((repository / "src/App.txt").read_text(), "app-v2\n")
+
+            (repository / "src/types.txt").write_text("external-edit\n")
+            fourth = deepcopy(third)
+            fourth["phase_id"] = "004-ui-external-drift"
+            fourth["caused_by"] = [third["phase_id"]]
+            fourth["predecessor_sha256"] = digest(third_receipt.read_bytes())
+            fourth["tasks"][0]["task_id"] = "ui-external-drift"
+            fourth["tasks"][0]["lineage_id"] = "lineage-ui-external-drift"
+            fourth["tasks"][0]["packet_path"] = "phases/004-ui-external-drift/tasks/ui-external-drift/packet.json"
+            fourth_packet_path = root / fourth["tasks"][0]["packet_path"]
+            fourth_packet_path.parent.mkdir(parents=True)
+            fourth_packet_path.write_bytes(packet_payload)
+            fourth["tasks"][0]["packet_sha256"] = digest(packet_payload)
+            with self.assertRaisesRegex(IntegrationConflict, "external drift"):
+                prepare_isolated_phase(
+                    root,
+                    repository,
+                    fourth,
+                    read_roots=(".",),
+                    admission_baseline=baseline,
+                    predecessor_sha256=fourth["predecessor_sha256"],
+                )
+            (repository / "src/types.txt").write_text("types-v2\n")
+            (root / "phases/002-ui/integration.patch.json").write_text("{}\n")
+            fifth = deepcopy(fourth)
+            fifth["phase_id"] = "005-tampered-source-head"
+            fifth["tasks"][0]["task_id"] = "tampered-source-head"
+            fifth["tasks"][0]["lineage_id"] = "lineage-tampered-source-head"
+            fifth["tasks"][0]["packet_path"] = "phases/005-tampered-source-head/tasks/tampered-source-head/packet.json"
+            fifth_packet_path = root / fifth["tasks"][0]["packet_path"]
+            fifth_packet_path.parent.mkdir(parents=True)
+            fifth_packet_path.write_bytes(packet_payload)
+            fifth["tasks"][0]["packet_sha256"] = digest(packet_payload)
+            with self.assertRaisesRegex(SourceWriteError, "integration replay failed"):
+                prepare_isolated_phase(
+                    root,
+                    repository,
+                    fifth,
+                    read_roots=(".",),
+                    admission_baseline=baseline,
+                    predecessor_sha256=fifth["predecessor_sha256"],
+                )
+
+    def test_source_writer_declared_paths_must_equal_the_host_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@example.com"], cwd=repository, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repository, check=True)
+            (repository / "src").mkdir()
+            target = repository / "src/value.txt"
+            target.write_text("base\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            baseline = self.source_baseline(repository)
+            baseline_payload = baseline_gate._canonical(baseline)
+            root = repository / ".workflow/run"
+            root.mkdir(parents=True)
+            plan = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            workflow["admission"]["profile"] = "source_write"
+            workflow["admission"]["capabilities"]["sandbox_isolation"]["status"] = "pass"
+            workflow["baseline_sha256"] = digest(baseline_payload)
+            workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            (root / workflow["baseline_ref"]).write_bytes(baseline_payload)
+            (root / "workflow.json").write_text(json.dumps(workflow, sort_keys=True, separators=(",", ":")) + "\n")
+            task = plan["tasks"][0]
+            task["work_mode"] = "write"
+            task["write_roots"] = ["src/value.txt"]
+            task["input_sha256"] = {workflow["baseline_ref"]: digest(baseline_payload)}
+            plan["predecessor_sha256"] = digest(baseline_payload)
+            self.bind_writer_schema(root, task)
+            phase = prepare_isolated_phase(
+                root,
+                repository,
+                plan,
+                admission_baseline=baseline,
+                predecessor_sha256=plan["predecessor_sha256"],
+            )
+
+            def execute(runtime_task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                (Path(runtime_task["_runtime_worker_root"]) / "src/value.txt").write_text("worker\n")
+                session = "declared-path-mismatch"
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": session},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"answer": "blocked", "changed_paths": []})}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+                    ],
+                    stderr="",
+                    turn_context={"model": "gpt-5.6-terra", "effort": "xhigh", "session_id": session},
+                )
+
+            with self.assertRaisesRegex(RuntimeFailure, "changed_paths differ from host patch"):
+                run_read_only_phase(
+                    root,
+                    plan,
+                    execute,
+                    max_parallel=1,
+                    source_phase=phase,
+                    runtime_task_overrides={task["task_id"]: {"_runtime_worker_root": os.fspath(phase.tasks[task["task_id"]].root)}},
+                )
+            self.assertEqual(target.read_text(), "base\n")
+            self.assertFalse((root / "phases/001-research/integration.patch.json").exists())
 
     def test_turn_failed_beats_exit_zero_and_route_mismatch_is_typed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -44,6 +44,25 @@
   authority is being revalidated. The fence now reconstructs the canonical plan,
   claim path, contention key, and full claim bytes before source integration;
   unrelated unfinished plans still fail closed.
+- Added a cumulative, receipt-bound workflow source head. Later writer Phases
+  now replay earlier applied patches over the immutable admission baseline, see
+  cross-anchor changes, and may safely revisit an already workflow-owned anchor;
+  unexplained user or external drift still fails closed.
+- Bound every production source writer's declared `changed_paths` to the exact
+  host-observed bounded patch, preventing a blocked/no-change semantic result
+  from silently integrating unrelated private-checkout bytes. The binding is
+  automatic for every source Phase and has no caller-controlled opt-out.
+- Added strict structured-output schema preflight before Phase authority or
+  model launch. Provider-invalid `const`/`enum` schemas now fail locally without
+  spending a routed turn, while supported nested `anyOf` and nullable unions are
+  accepted within the current 10-level / 5,000-property provider limits.
+- Sealed every selected source dependency in the source Phase and revalidated
+  it immediately before routed actor launch and again at integration. This
+  closes the snapshot-to-launch race without granting workers new repository
+  permissions; drift remains fail-closed and never reaches the shared checkout.
+- Rejected Python-only `NaN` and `Infinity` constants in packet, schema, and
+  typed-output JSON, and removed the remaining pathname-following read from
+  source integration-terminal replay.
 
 - Added a portable/strict-local session doctor, fail-closed new-skill scaffold,
   bilingual guide checks, and deterministic registry/changelog version markers.

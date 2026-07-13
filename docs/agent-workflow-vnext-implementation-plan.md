@@ -151,7 +151,13 @@ Gate：所有 owned process groups bounded terminal且無 zombie；觀察到 mar
 - 建立一個 transient isolated execution workspace；host policy若要求 worktree approval，第一次 writer前一次 human gate。
 - 從 sealed admission baseline replay HEAD → staged binary patch → unstaged binary patch → 全部 untracked bytes；
   一份 sealed template複製成每個 writer的獨立 workspace，不從 live checkout逐檔取樣。
+- 每個後續 writer Phase沿 terminal receipt chain，以no-follow reader驗receipt/plan/claim/result/output/
+  host check/patch/terminal後重播已套用的 bounded patches，seal cumulative source-head；workflow-owned
+  dirty paths可再次修改，任何read/write root內的原始user dirty與unexplained cross-anchor drift仍阻擋。
 - 每個 write phase launch前 seal actual write roots、dirty set與 source digests；不在 admission預先封死 dynamic roots。
+- Source Phase seal v2另外綁定全部selected read/write dependency roots與file manifest；plan/claim前、
+  executor call前、真正watchdog launch前與integration fence都重驗。launch前drift不建立actor，執行中drift
+  只可產生conflict／rollback，不能把stale-snapshot patch套進shared checkout。
 - Codex permission profile只讀必要 source/packet、只寫 isolated task roots；`.git` read-only、network disabled、
   sanitized env、no plugins/MCP/production credentials。
 - Path collision包含 ancestor、realpath/symlink、case-insensitive APFS、Unicode normalization、samefile/device/inode/hardlink。
@@ -161,11 +167,17 @@ Gate：所有 owned process groups bounded terminal且無 zombie；觀察到 mar
   staging chain以 owner-only directory FD + `O_NOFOLLOW`建立，patch expansion後重查實體 snapshot cap；
   post-swap drift/cancel（含 crash recovery期間）時 swap-back。Intent與terminal create-once，使 swap後、
   receipt前 crash可 reconcile。
+- Source writer schema只要進入source Phase就必須要求`changed_paths:string[]`，caller無opt-out；typed
+  declaration與host patch不一致時，在patch publication／atomic swap前fail。所有output schema先按OpenAI
+  strict subset做provider-compatible structural preflight，包含nested anyOf、nullable union、10層／5,000
+  properties上限；packet/schema/model output使用strict JSON parser，`NaN`/`Infinity`在model launch前拒絕。
 - `probe-source-write`以實際 Terra writer、watchdog request/terminal/events、persisted turn context與 deterministic
   macOS sandbox raw stdout/stderr產生 source capability；沒有 producer evidence不得 admission。
 
 Checks：dirty disjoint/overlap、case/Unicode/symlink/hardlink、out-of-root write、`.git/index`、commit/push/deploy、
-credential/network probe、two disjoint writers、live source drift before integration。
+credential/network probe、two disjoint writers、cross-anchor cumulative visibility、sequential same-anchor repair、
+typed/host changed-path mismatch、strict schema preflight、non-JSON numeric constant、snapshot-to-launch dependency
+drift、symlinked integration-terminal ancestor、live source drift before integration。
 
 Gate：worker無 external-effect capability；control artifacts不可篡改；任何 drift/overlap都在 shared checkout write前阻擋。
 

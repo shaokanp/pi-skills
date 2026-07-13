@@ -411,10 +411,24 @@ patch、unstaged binary patch與全部 untracked bytes，再依 phase read roots
 sealed template取得獨立 copy。Snapshot在 launch前有 file/byte/disk caps，tracked symlink、submodule、special
 file或不完整 baseline一律 fail closed。
 
+Admission baseline保持 immutable，但不是每個後續 write Phase永遠的 candidate head。Runner必須沿 authoritative
+terminal receipt chain，依序驗證並重播所有先前`integration.status=applied`的 bounded patches，產生
+create-once cumulative source-head manifest。每個 phase 的 receipt、plan、generation claim、task result、
+typed output、host check、patch與integration terminal 都必須用 no-follow reader重播；patch digest、
+`changed_paths`、`target_before`與`target_after`必須連續。遺漏、重排、偽造、symlink ancestor或不連續一律
+fail closed。先前 workflow patches完整解釋的 dirty paths視為 workflow-owned；admission前的 user dirty與
+無法由 cumulative head解釋的 live bytes仍是
+human gate／integration conflict。
+
+每個新source Phase必須以source-phase seal v2保存selected dependency roots及其完整file manifest，不能只在
+snapshot建立時比較一次。Runtime在phase authority前、每個executor真正呼叫前、watchdog process launch前，
+以及integration前後重驗同一manifest。啟動前drift不得建立actor request；執行期間drift不得integrate。
+已進atomic swap後，anchor由exact target digest負責，manifest fence仍重驗anchor外dependencies。
+
 Production source-writing不直接在使用者 shared checkout執行；editor不遵守 advisory lock，shared mode無法
 保證 live concurrent edit不被覆蓋。Runner為該 workflow建立一個 transient isolated execution workspace，
 worker permission profile只寫其中的互斥 roots。Phase terminal後，integration transaction重新驗證原 checkout
-對應 roots仍等於 sealed baseline，才套用 bounded patch；有 drift則不套用並 human gate。若 host policy要求
+對應 roots仍等於該 Phase的 cumulative sealed before-state，才套用 bounded patch；有 drift則不套用並 human gate。若 host policy要求
 worktree approval，第一次 writer前 batch詢問一次。Shared-checkout writer只可作明確 diagnostic mode，不得
 作 production-quality pass claim。
 
@@ -436,6 +450,16 @@ live repository root交給 worker。Snapshot manifest必須逐檔綁定bytes與m
 replay的transitive evidence；terminal fence需重驗manifest，tracked worktree deletion以檔案缺席表達。
 Snapshot copy必須從`O_NOFOLLOW` source file descriptor讀取，materialization前後重驗canonical repository
 state，禁止pathname replacement把credential或其他foreign target帶入snapshot。
+
+所有 production source-writer output schema必須要求`changed_paths: string[]`，而且這項約束由
+`source_phase`自動啟用，不得交給caller關閉。模型宣告的path set必須與host從isolated workspace計算出的
+bounded patch逐項一致，才可建立patch或atomic integrate。所有 routed output schemas也必須在Phase authority
+與模型launch前通過OpenAI strict Structured Outputs preflight：root是object且不可用`anyOf`；nested
+`anyOf`與`[type, null]`可用；object列出完整`required`並設`additionalProperties:false`；array有typed
+`items`；`const`/`enum`與type一致；object nesting最多10層、properties總數最多5,000。
+Packet、schema與model typed output的JSON parser必須拒絕Python decoder額外接受的`NaN`、`Infinity`及
+`-Infinity`。Replay reader必須以directory FD逐層`O_NOFOLLOW`讀取patch及integration terminal；先用pathname
+讀取、後續再安全重讀不能構成authority。
 
 ## 14. Validation and final authority
 

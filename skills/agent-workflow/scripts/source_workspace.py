@@ -25,6 +25,12 @@ from typing import Any, Callable
 
 from artifact_store import ArtifactError, create_once_json
 from baseline_gate import BaselineError, _unpack, verify_baseline
+from phase_protocol import (
+    ProtocolError,
+    _validate_source_patch_replay,
+    validate_contract,
+    validate_sidecar,
+)
 from repository_state import RepositoryStateError, collect_repository_state
 
 
@@ -54,6 +60,8 @@ class SourcePhase:
     repository: Path
     control_root: Path
     target_before: dict[str, str]
+    dependency_roots: tuple[str, ...]
+    dependency_files: dict[str, dict[str, Any]]
     tasks: dict[str, TaskWorkspace]
     seal_ref: str
     integration_anchor: str
@@ -181,6 +189,40 @@ def dirty_paths(repository: Path) -> list[str]:
     )
     untracked = set(_git_paths(repository, "ls-files", "--others", "--exclude-standard", "-z"))
     return sorted(tracked | untracked)
+
+
+def _selected_repository_files(
+    repository: Path,
+    roots: tuple[str, ...],
+    *,
+    workflow_owned_paths: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Project the exact live source bytes covered by a cumulative writer snapshot."""
+
+    tracked = set(_git_paths(repository, "ls-files", "--cached", "-z"))
+    untracked = set(_git_paths(repository, "ls-files", "--others", "--exclude-standard", "-z"))
+    candidates = tracked | untracked | set(workflow_owned_paths)
+    files: dict[str, dict[str, Any]] = {}
+    for relative in sorted(candidates, key=_fold_path):
+        parts = PurePosixPath(relative).parts
+        if not parts or any(part.casefold() in _RESERVED_PARTS for part in parts):
+            continue
+        folded = _fold_path(relative)
+        if not any(
+            root == "." or folded[: len(_fold_path(root))] == _fold_path(root)
+            for root in roots
+        ):
+            continue
+        path = repository / relative
+        if not path.exists() and not path.is_symlink():
+            continue
+        payload = _open_regular_payload(path, label="live source dependency")
+        metadata = path.stat(follow_symlinks=False)
+        files[relative] = {
+            "sha256": _digest(payload),
+            "mode": stat.S_IMODE(metadata.st_mode),
+        }
+    return files
 
 
 def prepare_read_only_snapshot(
@@ -352,15 +394,402 @@ def replay_read_only_snapshot(
     return destination, manifest
 
 
-def _assert_no_dirty_overlap(repository: Path, roots: dict[str, tuple[str, ...]]) -> None:
+def _assert_no_dirty_overlap(
+    repository: Path,
+    roots: dict[str, tuple[str, ...]],
+    *,
+    workflow_owned_paths: set[str] | None = None,
+) -> None:
     dirty = dirty_paths(repository)
+    owned = {_fold_path(path) for path in (workflow_owned_paths or set())}
     collisions = sorted(
         path
         for path in dirty
+        if _fold_path(path) not in owned
         if any(_overlap(path, root) for task_roots in roots.values() for root in task_roots)
     )
     if collisions:
         raise DirtyOverlap("writer roots overlap existing dirty paths: " + ", ".join(collisions))
+
+
+def _read_bound_json(
+    root: Path,
+    relative: str,
+    expected_sha256: str,
+    label: str,
+) -> tuple[dict[str, Any], bytes]:
+    parts = PurePosixPath(relative).parts
+    if (
+        PurePosixPath(relative).is_absolute()
+        or not parts
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise SourceWriteError(f"{label} reference is unsafe")
+    path = root.joinpath(*parts)
+    payload = _open_regular_payload(path, label=label)
+    if _digest(payload) != expected_sha256:
+        raise SourceWriteError(f"{label} digest drifted")
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SourceWriteError(f"{label} is invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise SourceWriteError(f"{label} must be an object")
+    return value, payload
+
+
+def _open_regular_payload(path: Path, *, label: str = "source-head artifact") -> bytes:
+    descriptor = _open_regular_file_no_follow(path)
+    try:
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > 32 * 1024 * 1024:
+                raise SourceWriteError(f"{label} exceeds the replay byte cap")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _receipt_refs_no_follow(control_root: Path) -> list[str]:
+    """List terminal phase receipts without following a control-plane symlink."""
+
+    phases = control_root / "phases"
+    if not phases.exists() and not phases.is_symlink():
+        return []
+    phases_fd = _open_directory_no_follow(phases)
+    refs: list[str] = []
+    try:
+        for phase_id in sorted(os.listdir(phases_fd)):
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", phase_id) is None:
+                raise SourceWriteError("source-head phase directory is unsafe")
+            try:
+                phase_fd = os.open(
+                    phase_id,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=phases_fd,
+                )
+            except OSError as exc:
+                raise SourceWriteError("source-head phase directory is unsafe") from exc
+            try:
+                try:
+                    metadata = os.stat("receipt.json", dir_fd=phase_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink > 1:
+                    raise SourceWriteError("source-head phase receipt is unsafe")
+                refs.append(f"phases/{phase_id}/receipt.json")
+            finally:
+                os.close(phase_fd)
+    finally:
+        os.close(phases_fd)
+    return refs
+
+
+def _authoritative_source_head(
+    control_root: Path,
+    *,
+    baseline_sha256: str,
+    predecessor_sha256: str,
+) -> tuple[dict[str, Any], set[str]]:
+    """Replay the one terminal receipt chain into a cumulative source authority."""
+
+    unordered: list[
+        tuple[str, dict[str, Any], bytes, dict[str, Any], dict[str, dict[str, Any]]]
+    ] = []
+    for receipt_ref in _receipt_refs_no_follow(control_root):
+        receipt_path = control_root / receipt_ref
+        receipt, receipt_payload = _read_bound_json(
+            control_root,
+            receipt_ref,
+            _digest(_open_regular_payload(receipt_path)),
+            "source-head phase receipt",
+        )
+        try:
+            validate_contract("phase-receipt", receipt)
+        except ProtocolError as exc:
+            raise SourceWriteError("source-head phase receipt is invalid") from exc
+        if receipt_payload != _canonical(receipt):
+            raise SourceWriteError("source-head phase receipt is not canonical")
+        plan_ref = f"phases/{receipt['phase_id']}/plan.json"
+        plan, plan_payload = _read_bound_json(
+            control_root,
+            plan_ref,
+            receipt["plan_sha256"],
+            "source-head phase plan",
+        )
+        try:
+            validate_contract("phase-plan", plan)
+        except ProtocolError as exc:
+            raise SourceWriteError("source-head phase plan is invalid") from exc
+        if (
+            plan["phase_id"] != receipt["phase_id"]
+            or plan["generation_id"] != receipt["generation_id"]
+            or plan["predecessor_sha256"] != receipt["predecessor_sha256"]
+            or plan_payload != _canonical(plan)
+        ):
+            raise SourceWriteError("source-head phase authority drifted")
+
+        contention = {
+            "predecessor_sha256": plan["predecessor_sha256"],
+            "authority_revision": plan["authority_revision"],
+        }
+        contention_key = _digest(_canonical(contention))
+        expected_claim_ref = (
+            f"generations/claims/{contention_key.removeprefix('sha256:')}.json"
+        )
+        if receipt["generation_claim_ref"] != expected_claim_ref:
+            raise SourceWriteError("source-head generation claim reference drifted")
+        claim, claim_payload = _read_bound_json(
+            control_root,
+            expected_claim_ref,
+            receipt["generation_claim_sha256"],
+            "source-head generation claim",
+        )
+        try:
+            validate_sidecar("generation-claim", claim)
+        except ProtocolError as exc:
+            raise SourceWriteError("source-head generation claim is invalid") from exc
+        expected_claim = {
+            "schema_version": "agent-workflow.generation-claim.vnext.v1",
+            "workflow_id": receipt["workflow_id"],
+            "generation_id": plan["generation_id"],
+            "phase_id": plan["phase_id"],
+            "predecessor_sha256": plan["predecessor_sha256"],
+            "authority_revision": plan["authority_revision"],
+            "plan_sha256": receipt["plan_sha256"],
+            "contention_key": contention_key,
+        }
+        if claim != expected_claim or claim_payload != _canonical(claim):
+            raise SourceWriteError("source-head generation claim does not bind the exact plan")
+
+        expected_result_refs = [
+            f"phases/{plan['phase_id']}/tasks/{task['task_id']}/result.json"
+            for task in plan["tasks"]
+        ]
+        if receipt["task_result_refs"] != expected_result_refs:
+            raise SourceWriteError("source-head task result references drifted")
+        results: dict[str, dict[str, Any]] = {}
+        for task, result_ref in zip(plan["tasks"], expected_result_refs, strict=True):
+            result, result_payload = _read_bound_json(
+                control_root,
+                result_ref,
+                receipt["task_result_sha256"][result_ref],
+                "source-head task result",
+            )
+            try:
+                validate_contract("task-result", result)
+            except ProtocolError as exc:
+                raise SourceWriteError("source-head task result is invalid") from exc
+            if (
+                result_payload != _canonical(result)
+                or result["workflow_id"] != receipt["workflow_id"]
+                or result["phase_id"] != plan["phase_id"]
+                or result["task_id"] != task["task_id"]
+                or result["lineage_id"] != task["lineage_id"]
+            ):
+                raise SourceWriteError("source-head task result authority drifted")
+            results[task["task_id"]] = result
+        unordered.append((receipt_ref, receipt, receipt_payload, plan, results))
+
+    current = baseline_sha256
+    remaining = list(unordered)
+    ordered: list[
+        tuple[str, dict[str, Any], bytes, dict[str, Any], dict[str, dict[str, Any]]]
+    ] = []
+    while remaining:
+        candidates = [item for item in remaining if item[3]["predecessor_sha256"] == current]
+        if len(candidates) != 1:
+            raise SourceWriteError("source-head receipts do not form one authoritative chain")
+        item = candidates[0]
+        ordered.append(item)
+        current = _digest(item[2])
+        remaining.remove(item)
+    if current != predecessor_sha256:
+        raise SourceWriteError("source-head predecessor does not match the proposed phase")
+
+    integrations: list[dict[str, Any]] = []
+    owned_paths: set[str] = set()
+    for receipt_ref, receipt, receipt_payload, plan, results in ordered:
+        integration = receipt["integration"]
+        if integration["status"] != "applied":
+            continue
+        if any(result["status"] != "completed" for result in results.values()):
+            raise SourceWriteError("applied source phase contains an unsuccessful writer")
+        for task in plan["tasks"]:
+            result = results[task["task_id"]]
+            expected_output_ref = (
+                f"phases/{plan['phase_id']}/tasks/{task['task_id']}/output.json"
+            )
+            if result["output_ref"] != expected_output_ref or result["output_sha256"] is None:
+                raise SourceWriteError("source-head writer output reference drifted")
+            output, output_payload = _read_bound_json(
+                control_root,
+                expected_output_ref,
+                result["output_sha256"],
+                "source-head writer output",
+            )
+            if output_payload != _canonical(output) or output.get("changed_paths") != result["changed_paths"]:
+                raise SourceWriteError("source-head writer output changed_paths drifted")
+            if result["checks"] != [
+                {
+                    "name": "host_changed_path_and_bounded_patch_audit",
+                    "exit_code": 0,
+                    "evidence_ref": integration["patch_ref"],
+                    "evidence_sha256": integration["patch_sha256"],
+                }
+            ]:
+                raise SourceWriteError("source-head writer host check drifted")
+        try:
+            _validate_source_patch_replay(control_root, plan, receipt, results)
+        except ProtocolError as exc:
+            raise SourceWriteError(f"source-head integration replay failed: {exc}") from exc
+        patch_ref = integration["patch_ref"]
+        patch, _ = _read_bound_json(
+            control_root,
+            patch_ref,
+            integration["patch_sha256"],
+            "source-head integration patch",
+        )
+        expected_patch_keys = {"schema_version", "phase_id", "target_before", "entries"}
+        if (
+            set(patch) != expected_patch_keys
+            or patch["schema_version"] != "agent-workflow.bounded-patch.vnext.v1"
+            or patch["phase_id"] != receipt["phase_id"]
+            or patch["target_before"] != integration["target_before"]
+            or not isinstance(patch["entries"], list)
+            or len(integration["target_before"]) != 1
+            or set(integration["target_before"]) != set(integration["target_after"])
+        ):
+            raise SourceWriteError("source-head integration patch contract drifted")
+        anchor = next(iter(integration["target_before"]))
+        for entry in patch["entries"]:
+            expected_entry_keys = {
+                "path",
+                "before_sha256",
+                "before_mode",
+                "after_sha256",
+                "after_mode",
+                "after_base64",
+            }
+            if not isinstance(entry, dict) or set(entry) != expected_entry_keys:
+                raise SourceWriteError("source-head patch entry contract drifted")
+            path = _safe_root(entry["path"])
+            if not _overlap(path, anchor) or _fold_path(path)[: len(_fold_path(anchor))] != _fold_path(anchor):
+                raise SourceWriteError("source-head patch escapes its integration anchor")
+            owned_paths.add(path)
+        terminal_ref = f"runtime/source-write/{receipt['phase_id']}/integration-terminal.json"
+        terminal_path = control_root / terminal_ref
+        terminal_payload = _open_regular_payload(terminal_path)
+        terminal, _ = _read_bound_json(
+            control_root,
+            terminal_ref,
+            _digest(terminal_payload),
+            "source-head integration terminal",
+        )
+        expected_terminal_keys = {
+            "schema_version",
+            "phase_id",
+            "status",
+            "patch_ref",
+            "patch_sha256",
+            "anchor",
+            "target_before",
+            "target_after",
+            "old_anchor_retained",
+        }
+        if (
+            set(terminal) != expected_terminal_keys
+            or terminal.get("schema_version") != "agent-workflow.integration-terminal.vnext.v1"
+            or terminal.get("status") != "applied"
+            or terminal.get("phase_id") != receipt["phase_id"]
+            or terminal.get("patch_ref") != patch_ref
+            or terminal.get("patch_sha256") != integration["patch_sha256"]
+            or terminal.get("anchor") != anchor
+            or terminal.get("target_before") != integration["target_before"]
+            or terminal.get("target_after") != integration["target_after"]
+            or not isinstance(terminal.get("old_anchor_retained"), bool)
+        ):
+            raise SourceWriteError("source-head integration terminal drifted")
+        integrations.append(
+            {
+                "phase_id": receipt["phase_id"],
+                "receipt_ref": receipt_ref,
+                "receipt_sha256": _digest(receipt_payload),
+                "patch_ref": patch_ref,
+                "patch_sha256": integration["patch_sha256"],
+                "generation_claim_ref": receipt["generation_claim_ref"],
+                "generation_claim_sha256": receipt["generation_claim_sha256"],
+                "task_result_refs": receipt["task_result_refs"],
+                "task_result_sha256": receipt["task_result_sha256"],
+                "terminal_ref": terminal_ref,
+                "terminal_sha256": _digest(terminal_payload),
+                "anchor": anchor,
+                "target_before": integration["target_before"],
+                "target_after": integration["target_after"],
+            }
+        )
+    source_head = {
+        "schema_version": "agent-workflow.source-head.vnext.v1",
+        "baseline_sha256": baseline_sha256,
+        "predecessor_sha256": predecessor_sha256,
+        "integrations": integrations,
+    }
+    source_head["source_head_sha256"] = _digest(_canonical(source_head))
+    return source_head, owned_paths
+
+
+def _replay_source_head(
+    control_root: Path,
+    template: Path,
+    source_head: dict[str, Any],
+    roots: tuple[str, ...],
+) -> None:
+    for integration in source_head["integrations"]:
+        anchor = integration["anchor"]
+        if not any(_overlap(anchor, root) for root in roots):
+            continue
+        patch, _ = _read_bound_json(
+            control_root,
+            integration["patch_ref"],
+            integration["patch_sha256"],
+            "source-head replay patch",
+        )
+        if _tree_digest(template, anchor) != integration["target_before"][anchor]:
+            raise SourceWriteError("source-head replay before digest drifted")
+        for entry in patch["entries"]:
+            relative = entry["path"]
+            target = template / relative
+            if target.exists():
+                if target.is_symlink() or not target.is_file():
+                    raise SourceWriteError("source-head replay target is unsafe")
+                before_sha = _digest(target.read_bytes())
+                before_mode = stat.S_IMODE(target.stat().st_mode)
+            else:
+                before_sha = None
+                before_mode = None
+            if before_sha != entry["before_sha256"] or before_mode != entry["before_mode"]:
+                raise SourceWriteError("source-head replay patch before state drifted")
+            if entry["after_base64"] is None:
+                if target.exists():
+                    target.unlink()
+                continue
+            try:
+                after = base64.b64decode(entry["after_base64"], validate=True)
+            except (ValueError, TypeError) as exc:
+                raise SourceWriteError("source-head replay patch payload is invalid") from exc
+            if _digest(after) != entry["after_sha256"] or not isinstance(entry["after_mode"], int):
+                raise SourceWriteError("source-head replay patch after state drifted")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(after)
+            target.chmod(entry["after_mode"])
+        if _tree_digest(template, anchor) != integration["target_after"][anchor]:
+            raise SourceWriteError("source-head replay after digest drifted")
 
 
 def _regular_files(root: Path) -> dict[str, dict[str, Any]]:
@@ -904,6 +1333,7 @@ def prepare_isolated_phase(
     *,
     read_roots: tuple[str, ...] | None = None,
     admission_baseline: dict[str, Any],
+    predecessor_sha256: str | None = None,
 ) -> SourcePhase:
     """Seal exact roots and create one private snapshot per writer task."""
 
@@ -923,19 +1353,48 @@ def prepare_isolated_phase(
             key=_fold_path,
         )
     )
-    _assert_no_dirty_overlap(repository, roots)
+    baseline_sha256 = _digest(_canonical(admission_baseline))
+    predecessor_sha256 = predecessor_sha256 or baseline_sha256
+    source_head, workflow_owned_paths = _authoritative_source_head(
+        control_root,
+        baseline_sha256=baseline_sha256,
+        predecessor_sha256=predecessor_sha256,
+    )
+    _assert_no_dirty_overlap(
+        repository,
+        roots,
+        workflow_owned_paths=workflow_owned_paths,
+    )
     all_roots = sorted({root for values in roots.values() for root in values}, key=_fold_path)
     anchor = _integration_anchor(all_roots)
-    snapshot_roots = tuple(sorted(set(snapshot_roots) | {anchor}, key=_fold_path))
+    replayed_anchors = {
+        item["anchor"]
+        for item in source_head["integrations"]
+        if any(_overlap(item["anchor"], root) for root in snapshot_roots)
+    }
+    snapshot_roots = tuple(
+        sorted(set(snapshot_roots) | {anchor} | replayed_anchors, key=_fold_path)
+    )
     task_workspaces: dict[str, TaskWorkspace] = {}
     seal_tasks: dict[str, Any] = {}
     template = control_root / "runtime" / "source-workspaces" / phase_id / "_sealed-base"
     if template.exists() or template.is_symlink():
         raise SourceWriteError("isolated source template already exists")
     _materialize_baseline(repository, template, admission_baseline, snapshot_roots)
+    _replay_source_head(control_root, template, source_head, snapshot_roots)
+    expected_live_files = _regular_files(template)
+    actual_live_files = _selected_repository_files(
+        repository,
+        snapshot_roots,
+        workflow_owned_paths=workflow_owned_paths,
+    )
+    if actual_live_files != expected_live_files:
+        raise IntegrationConflict(
+            "writer source dependencies contain unexplained external drift"
+        )
     before = {anchor: _tree_digest(template, anchor)}
     if _tree_digest(repository, anchor) != before[anchor]:
-        raise IntegrationConflict("writer integration anchor drifted from the admission baseline")
+        raise IntegrationConflict("writer integration anchor drifted from authoritative workflow state")
     for task in tasks:
         task_id = task["task_id"]
         workspace = control_root / "runtime" / "source-workspaces" / phase_id / task_id / "checkout"
@@ -950,11 +1409,14 @@ def prepare_isolated_phase(
             "initial_files": initial,
         }
     seal = {
-        "schema_version": "agent-workflow.source-phase-seal.vnext.v1",
+        "schema_version": "agent-workflow.source-phase-seal.vnext.v2",
         "phase_id": phase_id,
         "repository": os.fspath(repository),
         "dirty_paths": dirty_paths(repository),
-        "baseline_sha256": _digest(_canonical(admission_baseline)),
+        "baseline_sha256": baseline_sha256,
+        "source_head": source_head,
+        "dependency_roots": list(snapshot_roots),
+        "dependency_files": expected_live_files,
         "integration_anchor": anchor,
         "target_before": before,
         "tasks": seal_tasks,
@@ -969,6 +1431,8 @@ def prepare_isolated_phase(
         repository,
         control_root,
         before,
+        snapshot_roots,
+        expected_live_files,
         task_workspaces,
         seal_ref,
         anchor,
@@ -981,6 +1445,7 @@ def load_isolated_phase(
     plan: dict[str, Any],
     *,
     admission_baseline: dict[str, Any],
+    predecessor_sha256: str | None = None,
 ) -> SourcePhase:
     """Reconstruct a sealed source phase without trusting mutable workspace state."""
 
@@ -994,24 +1459,39 @@ def load_isolated_phase(
         seal = json.loads(seal_path.read_bytes())
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SourceWriteError("source phase seal is invalid JSON") from exc
-    if not isinstance(seal, dict) or set(seal) != {
+    if not isinstance(seal, dict):
+        raise SourceWriteError("source phase seal contract drifted")
+    schema_version = seal.get("schema_version")
+    expected_keys = {
         "schema_version",
         "phase_id",
         "repository",
         "dirty_paths",
         "baseline_sha256",
+        "source_head",
         "integration_anchor",
         "target_before",
         "tasks",
-    }:
+    }
+    if schema_version == "agent-workflow.source-phase-seal.vnext.v2":
+        expected_keys |= {"dependency_roots", "dependency_files"}
+    elif schema_version != "agent-workflow.source-phase-seal.vnext.v1":
+        raise SourceWriteError("source phase seal contract drifted")
+    if set(seal) != expected_keys:
         raise SourceWriteError("source phase seal contract drifted")
     if (
-        seal["schema_version"] != "agent-workflow.source-phase-seal.vnext.v1"
-        or seal["phase_id"] != plan["phase_id"]
+        seal["phase_id"] != plan["phase_id"]
         or seal["repository"] != os.fspath(repository)
         or seal["baseline_sha256"] != _digest(_canonical(admission_baseline))
     ):
         raise SourceWriteError("source phase seal identity drifted")
+    expected_head, _ = _authoritative_source_head(
+        control_root,
+        baseline_sha256=seal["baseline_sha256"],
+        predecessor_sha256=predecessor_sha256 or seal["baseline_sha256"],
+    )
+    if seal["source_head"] != expected_head:
+        raise SourceWriteError("source phase cumulative head drifted")
     anchor = _safe_root(seal["integration_anchor"])
     anchor_digest = seal["target_before"].get(anchor) if isinstance(seal["target_before"], dict) else None
     if (
@@ -1045,25 +1525,76 @@ def load_isolated_phase(
             roots,
             item["initial_files"],
         )
-    sealed_anchor = (
+    sealed_base = (
         control_root
         / "runtime"
         / "source-workspaces"
         / plan["phase_id"]
         / "_sealed-base"
-        / anchor
     )
+    sealed_anchor = sealed_base / anchor
     if _tree_digest_path(sealed_anchor) != seal["target_before"][anchor]:
         raise SourceWriteError("sealed source baseline tree drifted")
+    if schema_version == "agent-workflow.source-phase-seal.vnext.v2":
+        dependency_roots = tuple(
+            _safe_read_root(value) for value in seal["dependency_roots"]
+        )
+        dependency_files = seal["dependency_files"]
+        if (
+            list(dependency_roots) != seal["dependency_roots"]
+            or not isinstance(dependency_files, dict)
+            or dependency_files != _regular_files(sealed_base)
+        ):
+            raise SourceWriteError("source dependency manifest drifted")
+    else:
+        # v1 seals remain replayable after upgrade, but were created before
+        # launch-time dependency manifests existed. Reconciliation never
+        # launches actors, so an empty manifest is safe here.
+        dependency_roots = ()
+        dependency_files = {}
     return SourcePhase(
         plan["phase_id"],
         repository,
         control_root,
         seal["target_before"],
+        dependency_roots,
+        dependency_files,
         workspaces,
         seal_ref,
         anchor,
     )
+
+
+def revalidate_isolated_phase_launch(
+    phase: SourcePhase,
+    *,
+    allow_integrated_anchor: bool = False,
+) -> None:
+    """Fail closed if any selected live dependency changed after sealing."""
+
+    if not phase.dependency_roots:
+        raise IntegrationConflict("writer source dependency launch manifest is unavailable")
+    observed = _selected_repository_files(
+        phase.repository,
+        phase.dependency_roots,
+        workflow_owned_paths=set(phase.dependency_files),
+    )
+    expected = phase.dependency_files
+    if allow_integrated_anchor:
+        anchor = phase.integration_anchor
+
+        def outside_anchor(path: str) -> bool:
+            return anchor != "." and not (
+                _overlap(path, anchor)
+                and _fold_path(path)[: len(_fold_path(anchor))] == _fold_path(anchor)
+            )
+
+        observed = {path: value for path, value in observed.items() if outside_anchor(path)}
+        expected = {path: value for path, value in expected.items() if outside_anchor(path)}
+    if observed != expected:
+        raise IntegrationConflict(
+            "writer source dependencies contain unexplained external drift"
+        )
 
 
 def _snapshot_workspace(task: TaskWorkspace) -> dict[str, tuple[bytes, int]]:
@@ -1088,6 +1619,7 @@ def integrate_isolated_phase(
     max_patch_files: int = MAX_PATCH_FILES,
     max_patch_bytes: int = MAX_PATCH_BYTES,
     pre_apply_fence: Callable[[], None] | None = None,
+    declared_changed_paths: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Audit isolated changes, seal a patch, and apply only to the exact launch base."""
 
@@ -1132,6 +1664,15 @@ def integrate_isolated_phase(
                 }
             )
         changed_by_task[task_id] = changed
+    if declared_changed_paths is not None:
+        if set(declared_changed_paths) != completed_task_ids:
+            raise SourceWriteError("source writer changed-path declarations do not cover completed tasks")
+        for task_id in completed_task_ids:
+            declared = declared_changed_paths[task_id]
+            if sorted(declared, key=_fold_path) != changed_by_task[task_id]:
+                raise SourceWriteError(
+                    f"source writer changed_paths differ from host patch: {task_id}"
+                )
     if len(patch_entries) > max_patch_files:
         raise SourceWriteError("bounded patch file count exceeded")
     patch = {

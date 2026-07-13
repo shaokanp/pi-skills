@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import resource
@@ -84,6 +85,7 @@ from source_workspace import (
     load_isolated_phase,
     prepare_isolated_phase,
     prepare_read_only_snapshot,
+    revalidate_isolated_phase_launch,
     replay_read_only_snapshot,
     writer_profile_bytes,
 )
@@ -593,11 +595,19 @@ def _repository_root_for(path: Path) -> Path:
     raise RuntimeFailure("workflow root is not inside a Git repository")
 
 
+def _reject_non_json_constant(value: str) -> None:
+    raise ValueError(f"non-JSON numeric constant is forbidden: {value}")
+
+
+def _strict_json_loads(payload: bytes | str) -> Any:
+    return json.loads(payload, parse_constant=_reject_non_json_constant)
+
+
 def _load_packet(root: Path, task: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
         payload = _read_artifact_bytes(root, task["packet_path"], task["packet_sha256"])
-        packet = json.loads(payload)
-    except (ProtocolError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        packet = _strict_json_loads(payload)
+    except (ProtocolError, UnicodeDecodeError, ValueError) as exc:
         raise RuntimeFailure(f"invalid packet for {task['task_id']}: {exc}") from exc
     if not isinstance(packet, dict) or set(packet) != {
         "schema_version",
@@ -616,11 +626,12 @@ def _load_packet(root: Path, task: dict[str, Any]) -> tuple[dict[str, Any], dict
             packet["output_schema_ref"],
             packet["output_schema_sha256"],
         )
-        schema = json.loads(schema_payload)
-    except (ProtocolError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        schema = _strict_json_loads(schema_payload)
+    except (ProtocolError, UnicodeDecodeError, ValueError) as exc:
         raise RuntimeFailure(f"invalid output schema for {task['task_id']}: {exc}") from exc
     if not isinstance(schema, dict):
         raise RuntimeFailure(f"output schema must be an object for {task['task_id']}")
+    _validate_output_schema_contract(schema)
     for input_ref in task["input_refs"]:
         try:
             _read_artifact_bytes(root, input_ref, task["input_sha256"][input_ref])
@@ -632,6 +643,7 @@ def _load_packet(root: Path, task: dict[str, Any]) -> tuple[dict[str, Any], dict
 _SCHEMA_ANNOTATIONS = {"$schema", "$id", "title", "description", "default", "examples"}
 _SCHEMA_KEYWORDS = {
     "type",
+    "anyOf",
     "properties",
     "required",
     "additionalProperties",
@@ -639,6 +651,165 @@ _SCHEMA_KEYWORDS = {
     "enum",
     "const",
 }
+_SCHEMA_TYPES = {"object", "array", "string", "integer", "number", "boolean", "null"}
+_MAX_SCHEMA_OBJECT_DEPTH = 10
+_MAX_SCHEMA_PROPERTIES = 5_000
+
+
+def _is_json_number(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+    ) or (
+        isinstance(value, float)
+        and math.isfinite(value)
+    )
+
+
+def _value_matches_schema_type(value: Any, expected: str) -> bool:
+    checks = {
+        "object": lambda item: isinstance(item, dict),
+        "array": lambda item: isinstance(item, list),
+        "string": lambda item: isinstance(item, str),
+        "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+        "number": _is_json_number,
+        "boolean": lambda item: isinstance(item, bool),
+        "null": lambda item: item is None,
+    }
+    return expected in checks and checks[expected](value)
+
+
+def _schema_types(value: Any, path: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        types = (value,)
+    elif (
+        isinstance(value, list)
+        and len(value) == 2
+        and len(set(value)) == 2
+        and all(isinstance(item, str) for item in value)
+        and "null" in value
+    ):
+        types = tuple(value)
+    else:
+        raise RuntimeFailure(f"output schema node requires an explicit supported type at {path}")
+    if any(item not in _SCHEMA_TYPES for item in types):
+        raise RuntimeFailure(f"output schema node requires an explicit supported type at {path}")
+    return types
+
+
+def _validate_output_schema_contract(
+    schema: dict[str, Any],
+    path: str = "$",
+    *,
+    _root: bool = True,
+    _object_depth: int = 0,
+    _property_count: list[int] | None = None,
+) -> None:
+    """Validate the strict provider schema before any routed model launch."""
+
+    if not isinstance(schema, dict):
+        raise RuntimeFailure(f"output schema node must be an object at {path}")
+    if _property_count is None:
+        _property_count = [0]
+    unknown = set(schema) - _SCHEMA_ANNOTATIONS - _SCHEMA_KEYWORDS
+    if unknown:
+        raise RuntimeFailure(f"unsupported output schema keyword at {path}: {sorted(unknown)[0]}")
+    if "anyOf" in schema:
+        if _root:
+            raise RuntimeFailure("root output schema must be an object and cannot use anyOf")
+        if set(schema) - _SCHEMA_ANNOTATIONS - {"anyOf"}:
+            raise RuntimeFailure(f"anyOf schema cannot mix direct validation keywords at {path}")
+        choices = schema["anyOf"]
+        if not isinstance(choices, list) or not choices or not all(
+            isinstance(item, dict) for item in choices
+        ):
+            raise RuntimeFailure(f"anyOf requires non-empty schema branches at {path}")
+        for index, choice in enumerate(choices):
+            _validate_output_schema_contract(
+                choice,
+                f"{path}.anyOf[{index}]",
+                _root=False,
+                _object_depth=_object_depth,
+                _property_count=_property_count,
+            )
+        return
+
+    types = _schema_types(schema.get("type"), path)
+    if _root and types != ("object",):
+        raise RuntimeFailure("root output schema must be an object and cannot use anyOf")
+    if "const" in schema and not any(
+        _value_matches_schema_type(schema["const"], expected) for expected in types
+    ):
+        raise RuntimeFailure(f"output schema const does not match its type at {path}")
+    if "enum" in schema:
+        enum = schema["enum"]
+        if (
+            not isinstance(enum, list)
+            or not enum
+            or any(
+                not any(_value_matches_schema_type(item, expected) for expected in types)
+                for item in enum
+            )
+        ):
+            raise RuntimeFailure(f"output schema enum does not match its type at {path}")
+    if "object" in types:
+        object_depth = _object_depth + 1
+        if object_depth > _MAX_SCHEMA_OBJECT_DEPTH:
+            raise RuntimeFailure(f"output schema exceeds the maximum object nesting depth at {path}")
+        properties = schema.get("properties")
+        required = schema.get("required")
+        if (
+            not isinstance(properties, dict)
+            or not all(isinstance(key, str) and isinstance(value, dict) for key, value in properties.items())
+            or not isinstance(required, list)
+            or len(required) != len(set(required))
+            or set(required) != set(properties)
+            or schema.get("additionalProperties") is not False
+        ):
+            raise RuntimeFailure(
+                f"strict object schema requires all properties and additionalProperties=false at {path}"
+            )
+        _property_count[0] += len(properties)
+        if _property_count[0] > _MAX_SCHEMA_PROPERTIES:
+            raise RuntimeFailure("output schema exceeds the maximum property count")
+        for key, value in properties.items():
+            _validate_output_schema_contract(
+                value,
+                f"{path}.{key}",
+                _root=False,
+                _object_depth=object_depth,
+                _property_count=_property_count,
+            )
+        if "items" in schema:
+            raise RuntimeFailure(f"object schema cannot declare items at {path}")
+    elif "array" in types:
+        items = schema.get("items")
+        if not isinstance(items, dict):
+            raise RuntimeFailure(f"strict array schema requires items at {path}")
+        _validate_output_schema_contract(
+            items,
+            f"{path}[]",
+            _root=False,
+            _object_depth=_object_depth,
+            _property_count=_property_count,
+        )
+        if any(key in schema for key in ("properties", "required", "additionalProperties")):
+            raise RuntimeFailure(f"array schema cannot declare object keywords at {path}")
+    elif any(key in schema for key in ("properties", "required", "additionalProperties", "items")):
+        raise RuntimeFailure(f"scalar schema contains container keywords at {path}")
+
+
+def _validate_source_writer_schema(schema: dict[str, Any], task_id: str) -> None:
+    properties = schema.get("properties", {})
+    changed_paths = properties.get("changed_paths") if isinstance(properties, dict) else None
+    if (
+        not isinstance(changed_paths, dict)
+        or changed_paths.get("type") != "array"
+        or not isinstance(changed_paths.get("items"), dict)
+        or changed_paths["items"].get("type") != "string"
+        or "changed_paths" not in schema.get("required", [])
+    ):
+        raise RuntimeFailure(f"source writer output schema must require changed_paths for {task_id}")
 
 
 def _json_equal(left: Any, right: Any) -> bool:
@@ -665,6 +836,16 @@ def _validate_typed_output(value: Any, schema: dict[str, Any], path: str = "$") 
     unknown = set(schema) - _SCHEMA_ANNOTATIONS - _SCHEMA_KEYWORDS
     if unknown:
         raise RuntimeFailure(f"unsupported output schema keyword at {path}: {sorted(unknown)[0]}")
+    if "anyOf" in schema:
+        choices = schema["anyOf"]
+        failures: list[str] = []
+        for choice in choices:
+            try:
+                _validate_typed_output(value, choice, path)
+                return
+            except RuntimeFailure as exc:
+                failures.append(str(exc))
+        raise RuntimeFailure(f"output does not satisfy anyOf at {path}: {failures[0]}")
     if "enum" in schema:
         enum = schema["enum"]
         if not isinstance(enum, list) or not any(_json_equal(value, item) for item in enum):
@@ -673,20 +854,20 @@ def _validate_typed_output(value: Any, schema: dict[str, Any], path: str = "$") 
         raise RuntimeFailure(f"output does not satisfy const at {path}")
 
     expected = schema.get("type")
+    accepted_types: tuple[str, ...] = ()
     type_checks = {
         "object": lambda item: isinstance(item, dict),
         "array": lambda item: isinstance(item, list),
         "string": lambda item: isinstance(item, str),
         "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
-        "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
+        "number": _is_json_number,
         "boolean": lambda item: isinstance(item, bool),
         "null": lambda item: item is None,
     }
     if expected is not None:
-        if expected not in type_checks:
-            raise RuntimeFailure(f"unsupported output schema type at {path}: {expected!r}")
-        if not type_checks[expected](value):
-            raise RuntimeFailure(f"output type mismatch at {path}: expected {expected}")
+        accepted_types = _schema_types(expected, path)
+        if not any(type_checks[item](value) for item in accepted_types):
+            raise RuntimeFailure(f"output type mismatch at {path}: expected {list(accepted_types)}")
 
     if isinstance(value, dict):
         properties = schema.get("properties", {})
@@ -711,7 +892,10 @@ def _validate_typed_output(value: Any, schema: dict[str, Any], path: str = "$") 
                 _validate_typed_output(item, additional, f"{path}.{key}")
             elif additional is not True:
                 raise RuntimeFailure(f"invalid additionalProperties schema at {path}")
-    elif any(key in schema for key in ("properties", "required", "additionalProperties")):
+    elif (
+        any(key in schema for key in ("properties", "required", "additionalProperties"))
+        and not (value is None and "null" in accepted_types)
+    ):
         raise RuntimeFailure(f"object keywords require object output at {path}")
 
     if isinstance(value, list):
@@ -721,7 +905,7 @@ def _validate_typed_output(value: Any, schema: dict[str, Any], path: str = "$") 
                 raise RuntimeFailure(f"invalid items schema at {path}")
             for index, item in enumerate(value):
                 _validate_typed_output(item, items, f"{path}[{index}]")
-    elif "items" in schema:
+    elif "items" in schema and not (value is None and "null" in accepted_types):
         raise RuntimeFailure(f"items requires array output at {path}")
 
 
@@ -2477,6 +2661,7 @@ def _reconcile_run(
                             repository_root,
                             plan,
                             admission_baseline=admission_baseline,
+                            predecessor_sha256=plan["predecessor_sha256"],
                         )
                     except (
                         ProtocolError,
@@ -2643,6 +2828,9 @@ def codex_task_executor(config: CodexExecConfig) -> TaskExecutor:
         execution_codex_home = Path(task.get("_runtime_codex_home", codex_home)).resolve()
         permissions_profile = task.get("_runtime_permissions_profile", config.permissions_profile)
         write_roots = tuple(task.get("_runtime_write_roots", ()))
+        source_launch_fence = task.get("_runtime_source_launch_fence")
+        if task.get("work_mode") == "write" and not callable(source_launch_fence):
+            raise RuntimeFailure("source task lacks its launch-time dependency fence")
         resume_binding = task.get("_runtime_resume_binding")
         if not isinstance(permissions_profile, str) or not permissions_profile:
             raise RuntimeFailure("task permission profile is invalid")
@@ -2794,6 +2982,8 @@ def codex_task_executor(config: CodexExecConfig) -> TaskExecutor:
         }
         try:
             create_once_json(run_root, request_ref, request)
+            if source_launch_fence is not None:
+                source_launch_fence()
             watchdog = launch_supervisor(run_root, request_ref)
             watchdog.wait(timeout=max(1.0, timeout_seconds + config.terminate_grace_seconds + 5.0))
         except ArtifactError as exc:
@@ -3224,8 +3414,8 @@ def _prepare_result(
             and isinstance(event["item"].get("text"), str)
         ]
         try:
-            output = json.loads(messages[-1]) if messages else None
-        except json.JSONDecodeError:
+            output = _strict_json_loads(messages[-1]) if messages else None
+        except ValueError:
             output = None
         if not isinstance(output, dict):
             status = "failed"
@@ -3340,6 +3530,14 @@ def run_read_only_phase(
         workflow["admission"]["host_capacity"]["max_parallel_tasks"],
     )
     packets = {task["task_id"]: _load_packet(root, task) for task in plan["tasks"]}
+    if source_writing:
+        for task in plan["tasks"]:
+            _validate_source_writer_schema(packets[task["task_id"]][1], task["task_id"])
+        if not reconciling:
+            try:
+                revalidate_isolated_phase_launch(source_phase)
+            except SourceWriteError as exc:
+                raise RuntimeFailure(f"source-write launch rejected: {exc}") from exc
     plan_payload = _canonical(plan)
     plan_ref = f"phases/{plan['phase_id']}/plan.json"
     if reconciling:
@@ -3397,11 +3595,26 @@ def run_read_only_phase(
         for task in plan["tasks"]
     ]
 
-    phase_execute = (
-        (lambda task, _packet: reconciled_executions[task["task_id"]])
-        if reconciling
-        else execute
-    )
+    def source_launch_fence() -> None:
+        if source_phase is None:
+            return
+        try:
+            revalidate_isolated_phase_launch(source_phase)
+        except SourceWriteError as exc:
+            raise RuntimeFailure(f"source-write launch rejected: {exc}") from exc
+
+    if source_writing and not reconciling:
+        for task in dispatched_tasks:
+            task["_runtime_source_launch_fence"] = source_launch_fence
+
+    if reconciling:
+        phase_execute = lambda task, _packet: reconciled_executions[task["task_id"]]
+    elif source_writing:
+        def phase_execute(task: dict[str, Any], packet: dict[str, Any]) -> RawExecution:
+            source_launch_fence()
+            return execute(task, packet)
+    else:
+        phase_execute = execute
     with ThreadPoolExecutor(max_workers=admitted, thread_name_prefix="vnext-read") as pool:
         futures = {
             task["task_id"]: pool.submit(
@@ -3446,20 +3659,57 @@ def run_read_only_phase(
                     f"read snapshot produced an invalid task result for {item.task_id}: {exc}"
                 ) from exc
     if source_phase is not None:
+        dependency_conflict = False
+        if not reconciling:
+            try:
+                revalidate_isolated_phase_launch(source_phase)
+            except SourceWriteError:
+                dependency_conflict = True
         completed_task_ids = {
             item.task_id for item in prepared if item.result["status"] == "completed"
         }
+        declared_changed_paths: dict[str, list[str]] = {}
+        for item in prepared:
+            if item.result["status"] != "completed":
+                continue
+            try:
+                output = json.loads(item.output_payload) if item.output_payload is not None else None
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeFailure("source writer typed output is unavailable") from exc
+            declared = output.get("changed_paths") if isinstance(output, dict) else None
+            if (
+                not isinstance(declared, list)
+                or not all(isinstance(path, str) and path for path in declared)
+                or len(declared) != len(set(declared))
+            ):
+                raise RuntimeFailure("source writer changed_paths declaration is invalid")
+            declared_changed_paths[item.task_id] = declared
+
+        source_dependency_fence_calls = 0
 
         def pre_apply_fence() -> None:
+            nonlocal source_dependency_fence_calls
             if _cancel_request(root, plan["authority_revision"]) is not None:
                 raise SourceWriteError("cancel fence rejects source integration")
+            if not reconciling:
+                revalidate_isolated_phase_launch(
+                    source_phase,
+                    allow_integrated_anchor=source_dependency_fence_calls > 0,
+                )
+                source_dependency_fence_calls += 1
         try:
             outcome = integrate_isolated_phase(
                 source_phase,
                 completed_task_ids=completed_task_ids,
-                apply=len(completed_task_ids) == len(prepared),
+                apply=(
+                    len(completed_task_ids) == len(prepared)
+                    and not dependency_conflict
+                ),
                 pre_apply_fence=pre_apply_fence,
+                declared_changed_paths=declared_changed_paths,
             )
+            if dependency_conflict:
+                outcome["status"] = "conflict"
         except SourceWriteError as exc:
             raise RuntimeFailure(f"source integration failed closed: {exc}") from exc
         for item in prepared:
@@ -3927,6 +4177,14 @@ def _run_phase_command(
     source_writing = any(task["work_mode"] == "write" for task in plan["tasks"])
     if source_writing and any(task["work_mode"] != "write" for task in plan["tasks"]):
         raise RuntimeFailure("source-writing Phase cannot mix read and write tasks")
+    for task in plan["tasks"]:
+        _packet, schema = _load_packet(root, task)
+        if task["work_mode"] == "write":
+            _validate_source_writer_schema(schema, task["task_id"])
+    try:
+        prepare_phase_authority(root, workflow, plan, reconciling=False)
+    except RecoveryError as exc:
+        raise RuntimeFailure(str(exc)) from exc
     resource_admission = _resource_admission(
         root,
         workflow,
@@ -3964,6 +4222,7 @@ def _run_phase_command(
                     plan,
                     read_roots=tuple(workflow["admission"]["relevant_roots"]),
                     admission_baseline=admission_baseline,
+                    predecessor_sha256=plan["predecessor_sha256"],
                 )
             except DirtyOverlap as exc:
                 raise HumanGateRequired(str(exc)) from exc
