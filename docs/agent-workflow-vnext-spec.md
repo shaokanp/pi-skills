@@ -197,6 +197,10 @@ terminal barrier平行執行 pinned Terra／Sol read-only probes，逐一 seal r
 permission profile、terminal token usage、read-only denial與 focused lifecycle tests，再輸出可直接綁入
 `workflow.json`的 capability refs。`source_write`另組合 live `probe-source-write` 的
 `sandbox_isolation` binding。兩者皆綁 running bundle、Codex binary/version、relevant root與24小時 freshness。
+`probe-source-write`本身也是write actor，不得繞過source launch fence：host必須先seal probe專用synthetic
+workspace的directory-FD manifest（root/ancestor containment、dev/ino/type/owner/mode/link count、file digest），
+並在watchdog真正launch前以`O_NOFOLLOW`重驗；任何root replacement、新增檔案、symlink、hardlink或unsafe node
+都使admission fail且不得呼叫supervisor。這個fence只保護host-owned disposable probe workspace，不增加worker對live repository的權限。
 Host probe的`relevant_root`必須是該workflow create-once snapshot checkout；admission重播同一snapshot manifest
 並要求其canonical repository state仍等於live source。不得把isolated snapshot path與live checkout path直接比較，
 也不得為了通過admission改成讓worker讀live checkout。Host receipt必須另外綁snapshot manifest ref+digest；

@@ -816,6 +816,218 @@ class ReadOnlyTracerTests(unittest.TestCase):
             },
         )
 
+    def test_source_write_probe_installs_a_real_launch_fence(self) -> None:
+        class ProbeCaptured(RuntimeError):
+            pass
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            binary = root / "codex"
+            binary.write_text("fixture\n")
+            binary.chmod(0o755)
+            auth = root / "auth.json"
+            auth.write_text(json.dumps({"OPENAI_API_KEY": "fixture"}) + "\n")
+
+            def fake_executor(_config: CodexExecConfig):
+                def execute(task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                    fence = task.get("_runtime_source_launch_fence")
+                    self.assertTrue(callable(fence))
+                    fence()
+                    workspace = Path(task["_runtime_worker_root"])
+                    (workspace / "unexpected.txt").write_text("drift\n")
+                    with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                        fence()
+                    (workspace / "unexpected.txt").unlink()
+                    (workspace / "escape").symlink_to(root)
+                    with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                        fence()
+                    (workspace / "escape").unlink()
+                    outside = root / "outside.txt"
+                    outside.write_text("outside\n")
+                    os.link(outside, workspace / "hardlink.txt")
+                    with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                        fence()
+                    (workspace / "hardlink.txt").unlink()
+                    os.mkfifo(workspace / "fifo")
+                    with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                        fence()
+                    raise ProbeCaptured("launch fence observed")
+
+                return execute
+
+            with (
+                mock.patch(
+                    "workflow_runtime._codex_identity",
+                    return_value=(binary, digest(binary.read_bytes()), "fixture-cli"),
+                ),
+                mock.patch("workflow_runtime.codex_task_executor", side_effect=fake_executor),
+                self.assertRaisesRegex(ProbeCaptured, "launch fence observed"),
+            ):
+                workflow_runtime._probe_source_write_command(root, auth, os.fspath(binary))
+
+    def test_source_write_probe_launch_fence_rejects_root_and_ancestor_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            probe_root = root / "evidence/source-write-probe"
+            workspace = probe_root / "workspace"
+            (workspace / "src/api").mkdir(parents=True)
+            (workspace / ".git").mkdir()
+            fence = workflow_runtime._seal_source_write_probe_launch_fence(workspace)
+
+            saved_workspace = probe_root / "workspace.saved"
+            workspace.rename(saved_workspace)
+            with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                fence()
+            workspace.symlink_to(root)
+            with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                fence()
+            workspace.unlink()
+            os.mkfifo(workspace)
+            with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                fence()
+            workspace.unlink()
+            saved_workspace.rename(workspace)
+
+            saved_probe_root = root / "source-write-probe.saved"
+            probe_root.rename(saved_probe_root)
+            probe_root.symlink_to(saved_probe_root)
+            with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                fence()
+            probe_root.unlink()
+            probe_root.mkdir()
+            (saved_probe_root / "workspace").rename(workspace)
+            with self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"):
+                fence()
+
+    def test_source_write_probe_launch_fence_wraps_initial_descriptor_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw).resolve()
+            with (
+                mock.patch("workflow_runtime.os.open", side_effect=OSError("EMFILE")),
+                self.assertRaisesRegex(RuntimeFailure, "workspace root cannot be opened"),
+            ):
+                workflow_runtime._seal_source_write_probe_launch_fence(workspace)
+
+    def test_source_write_probe_rejects_preexisting_workspace_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            probe_root = root / "evidence/source-write-probe"
+            probe_root.mkdir(parents=True)
+            outside = root / "outside"
+            (outside / "src/api").mkdir(parents=True)
+            (probe_root / "workspace").symlink_to(outside)
+            binary = root / "codex"
+            binary.write_text("fixture\n")
+            binary.chmod(0o755)
+            auth = root / "auth.json"
+            auth.write_text(json.dumps({"OPENAI_API_KEY": "fixture"}) + "\n")
+            with (
+                mock.patch(
+                    "workflow_runtime._codex_identity",
+                    return_value=(binary, digest(binary.read_bytes()), "fixture-cli"),
+                ),
+                mock.patch("workflow_runtime.codex_task_executor") as executor,
+                self.assertRaisesRegex(RuntimeFailure, "workspace is unsafe"),
+            ):
+                workflow_runtime._probe_source_write_command(root, auth, os.fspath(binary))
+            executor.assert_not_called()
+
+    def test_source_write_probe_rejects_preexisting_workspace_content(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            workspace = root / "evidence/source-write-probe/workspace"
+            (workspace / "src/api").mkdir(parents=True)
+            (workspace / ".git").mkdir()
+            (workspace / "stale-secret.txt").write_text("must not be exposed\n")
+            binary = root / "codex"
+            binary.write_text("fixture\n")
+            binary.chmod(0o755)
+            auth = root / "auth.json"
+            auth.write_text(json.dumps({"OPENAI_API_KEY": "fixture"}) + "\n")
+            with (
+                mock.patch(
+                    "workflow_runtime._codex_identity",
+                    return_value=(binary, digest(binary.read_bytes()), "fixture-cli"),
+                ),
+                mock.patch("workflow_runtime.codex_task_executor") as executor,
+                self.assertRaisesRegex(RuntimeFailure, "empty synthetic layout"),
+            ):
+                workflow_runtime._probe_source_write_command(root, auth, os.fspath(binary))
+            executor.assert_not_called()
+
+    def test_source_write_launch_fence_failure_prevents_watchdog_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            schema = root / "schemas/output.json"
+            schema.parent.mkdir()
+            schema.write_text(
+                json.dumps(
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["answer"],
+                        "properties": {"answer": {"type": "string"}},
+                    }
+                )
+                + "\n"
+            )
+            binary = root / "codex"
+            binary.write_text("fixture\n")
+            binary.chmod(0o755)
+            task = {
+                **self.direct_runtime_fence(root),
+                "task_id": "fenced-writer",
+                "role": "worker",
+                "work_mode": "write",
+                "write_roots": ["src/api"],
+                "execution_deadline_seconds": 5,
+                "_runtime_source_launch_fence": mock.Mock(
+                    side_effect=RuntimeFailure("probe workspace drifted before actor launch")
+                ),
+            }
+            execute = codex_task_executor(
+                CodexExecConfig(
+                    run_root=root,
+                    repo_root=root,
+                    codex_home=root / "codex-home",
+                    codex_binary=os.fspath(binary),
+                )
+            )
+            with (
+                mock.patch("workflow_runtime.launch_supervisor") as launch,
+                self.assertRaisesRegex(RuntimeFailure, "probe workspace drifted"),
+            ):
+                execute(
+                    task,
+                    {"output_schema_ref": "schemas/output.json", "prompt": "bounded"},
+                )
+            launch.assert_not_called()
+
+    def test_direct_source_write_actor_without_launch_fence_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            execute = codex_task_executor(
+                CodexExecConfig(
+                    run_root=root,
+                    repo_root=root,
+                    codex_home=root / "codex-home",
+                    codex_binary=os.fspath(root / "not-reached-codex"),
+                )
+            )
+            with self.assertRaisesRegex(
+                RuntimeFailure, "source task lacks its launch-time dependency fence"
+            ):
+                execute(
+                    {
+                        "task_id": "unfenced-writer",
+                        "role": "worker",
+                        "work_mode": "write",
+                        "write_roots": ["src/api"],
+                        "execution_deadline_seconds": 5,
+                    },
+                    {"output_schema_ref": "schemas/output.json", "prompt": "bounded"},
+                )
+
     def test_cancel_at_terminal_fence_cannot_publish_completed_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -4465,6 +4677,9 @@ for line in sys.stdin:
                         "_runtime_codex_home": os.fspath(codex_home),
                         "_runtime_permissions_profile": "vnext-writer",
                         "_runtime_write_roots": ["src/api"],
+                        "_runtime_source_launch_fence": (
+                            workflow_runtime._seal_source_write_probe_launch_fence(workspace)
+                        ),
                     },
                     {
                         "output_schema_ref": "schemas/writer-output.json",

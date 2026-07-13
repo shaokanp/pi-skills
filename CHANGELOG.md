@@ -60,6 +60,12 @@
   it immediately before routed actor launch and again at integration. This
   closes the snapshot-to-launch race without granting workers new repository
   permissions; drift remains fail-closed and never reaches the shared checkout.
+- Applied the same mandatory launch-fence contract to the live source-write
+  capability probe. Its disposable synthetic workspace is sealed before the
+  probe task is built and revalidated through no-follow directory descriptors
+  at the actual watchdog launch boundary; unfenced write actors, replaced
+  roots/ancestors, repeated inodes, and unsafe-node drift remain admission
+  failures.
 - Rejected Python-only `NaN` and `Infinity` constants in packet, schema, and
   typed-output JSON, and removed the remaining pathname-following read from
   source integration-terminal replay.

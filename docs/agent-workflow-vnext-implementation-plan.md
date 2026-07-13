@@ -172,12 +172,16 @@ Gate：所有 owned process groups bounded terminal且無 zombie；觀察到 mar
   strict subset做provider-compatible structural preflight，包含nested anyOf、nullable union、10層／5,000
   properties上限；packet/schema/model output使用strict JSON parser，`NaN`/`Infinity`在model launch前拒絕。
 - `probe-source-write`以實際 Terra writer、watchdog request/terminal/events、persisted turn context與 deterministic
-  macOS sandbox raw stdout/stderr產生 source capability；沒有 producer evidence不得 admission。
+  macOS sandbox raw stdout/stderr產生 source capability；沒有 producer evidence不得 admission。Probe也必須先seal
+  自己的disposable synthetic workspace directory-FD manifest（含root/ancestor與inode identity），並把host-only
+  callable fence帶到watchdog launch boundary；
+  unfenced write actor或probe workspace drift一律在模型launch前拒絕。
 
 Checks：dirty disjoint/overlap、case/Unicode/symlink/hardlink、out-of-root write、`.git/index`、commit/push/deploy、
 credential/network probe、two disjoint writers、cross-anchor cumulative visibility、sequential same-anchor repair、
 typed/host changed-path mismatch、strict schema preflight、non-JSON numeric constant、snapshot-to-launch dependency
 drift、symlinked integration-terminal ancestor、live source drift before integration。
+Source-write capability probe另驗：real launch fence存在、sealed workspace drift/symlink拒絕、direct unfenced writer拒絕。
 
 Gate：worker無 external-effect capability；control artifacts不可篡改；任何 drift/overlap都在 shared checkout write前阻擋。
 

@@ -13,6 +13,7 @@ import resource
 import shutil
 import shlex
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -80,6 +81,7 @@ from source_workspace import (
     DirtyOverlap,
     SourcePhase,
     SourceWriteError,
+    _secure_private_directory,
     attest_writer_permissions,
     integrate_isolated_phase,
     load_isolated_phase,
@@ -4871,6 +4873,178 @@ def _probe_host_capabilities_command(
             _cleanup_codex_auth(home)
 
 
+def _source_write_probe_workspace_manifest(workspace: Path) -> dict[str, Any]:
+    """Read a private probe tree through no-follow descriptors."""
+
+    workspace = Path(workspace)
+    if not workspace.is_absolute() or any(part in {".", ".."} for part in workspace.parts[1:]):
+        raise RuntimeFailure("source-write probe workspace path is not absolute and normalized")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    seen: set[tuple[int, int]] = set()
+    entries: dict[str, dict[str, Any]] = {}
+
+    def open_chain() -> tuple[int, list[dict[str, Any]]]:
+        try:
+            current_fd = os.open("/", directory_flags)
+        except OSError as exc:
+            raise RuntimeFailure("source-write probe workspace root cannot be opened") from exc
+        chain: list[dict[str, Any]] = []
+        try:
+            for component in workspace.parts[1:]:
+                child_fd = os.open(component, directory_flags, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = child_fd
+                metadata = os.fstat(current_fd)
+                chain.append(
+                    {
+                        "component": component,
+                        "device": metadata.st_dev,
+                        "inode": metadata.st_ino,
+                        "type": "directory" if stat.S_ISDIR(metadata.st_mode) else "unsafe",
+                        "owner": metadata.st_uid,
+                        "mode": stat.S_IMODE(metadata.st_mode),
+                    }
+                )
+            return current_fd, chain
+        except OSError as exc:
+            os.close(current_fd)
+            raise RuntimeFailure("source-write probe workspace path is unsafe") from exc
+        except Exception:
+            os.close(current_fd)
+            raise
+
+    def identity(metadata: os.stat_result, *, kind: str) -> dict[str, Any]:
+        return {
+            "type": kind,
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "owner": metadata.st_uid,
+            "links": metadata.st_nlink,
+            "size": metadata.st_size,
+            "modified_ns": metadata.st_mtime_ns,
+            "changed_ns": metadata.st_ctime_ns,
+        }
+
+    def stable_identity(metadata: os.stat_result) -> tuple[int, ...]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_uid,
+            metadata.st_nlink,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    def walk(directory_fd: int, prefix: str) -> None:
+        for name in sorted(os.listdir(directory_fd)):
+            if not name or name in {".", ".."} or "/" in name:
+                raise RuntimeFailure("source-write probe workspace has an unsafe entry name")
+            relative = f"{prefix}/{name}" if prefix else name
+            try:
+                before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeFailure("source-write probe workspace changed during sealing") from exc
+            inode = (before.st_dev, before.st_ino)
+            if inode in seen:
+                raise RuntimeFailure("source-write probe workspace contains a repeated inode")
+            if before.st_uid != os.getuid():
+                raise RuntimeFailure("source-write probe workspace has an unexpected owner")
+            if stat.S_ISDIR(before.st_mode):
+                try:
+                    child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise RuntimeFailure("source-write probe workspace contains an unsafe directory") from exc
+                try:
+                    observed = os.fstat(child_fd)
+                    if (observed.st_dev, observed.st_ino) != inode:
+                        raise RuntimeFailure("source-write probe directory identity drifted")
+                    seen.add(inode)
+                    walk(child_fd, relative)
+                    after = os.fstat(child_fd)
+                    if stable_identity(after) != stable_identity(observed):
+                        raise RuntimeFailure("source-write probe directory changed during sealing")
+                    entries[relative] = identity(after, kind="directory")
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise RuntimeFailure("source-write probe workspace contains an unsafe node")
+            try:
+                file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            except OSError as exc:
+                raise RuntimeFailure("source-write probe workspace contains an unsafe file") from exc
+            try:
+                observed = os.fstat(file_fd)
+                if (
+                    (observed.st_dev, observed.st_ino) != inode
+                    or not stat.S_ISREG(observed.st_mode)
+                    or observed.st_nlink != 1
+                ):
+                    raise RuntimeFailure("source-write probe file identity drifted")
+                payload = bytearray()
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    payload.extend(chunk)
+                after = os.fstat(file_fd)
+                if stable_identity(after) != stable_identity(observed):
+                    raise RuntimeFailure("source-write probe file changed during sealing")
+                seen.add(inode)
+                entries[relative] = {
+                    **identity(after, kind="file"),
+                    "sha256": _digest(bytes(payload)),
+                }
+            finally:
+                os.close(file_fd)
+
+    root_fd, path_chain = open_chain()
+    try:
+        root_metadata = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_metadata.st_mode) or root_metadata.st_uid != os.getuid():
+            raise RuntimeFailure("source-write probe workspace root is unsafe")
+        seen.add((root_metadata.st_dev, root_metadata.st_ino))
+        walk(root_fd, "")
+        root_after = os.fstat(root_fd)
+        if stable_identity(root_after) != stable_identity(root_metadata):
+            raise RuntimeFailure("source-write probe workspace root changed during sealing")
+        return {
+            "path_chain": path_chain,
+            "root": identity(root_after, kind="directory"),
+            "entries": entries,
+        }
+    except OSError as exc:
+        raise RuntimeFailure("source-write probe workspace changed during sealing") from exc
+    finally:
+        os.close(root_fd)
+
+
+def _seal_source_write_probe_launch_fence(workspace: Path) -> Callable[[], None]:
+    """Seal one disposable writer-probe workspace until its actor launch."""
+
+    workspace = Path(workspace)
+    sealed_workspace = _source_write_probe_workspace_manifest(workspace)
+    expected_directories = {".git", "src", "src/api"}
+    if (
+        set(sealed_workspace["entries"]) != expected_directories
+        or any(
+            sealed_workspace["entries"][relative].get("type") != "directory"
+            for relative in expected_directories
+        )
+    ):
+        raise RuntimeFailure("source-write probe workspace is not the empty synthetic layout")
+
+    def source_launch_fence() -> None:
+        try:
+            observed_workspace = _source_write_probe_workspace_manifest(workspace)
+        except (RuntimeFailure, SourceWriteError) as exc:
+            raise RuntimeFailure(f"source-write probe workspace drifted: {exc}") from exc
+        if observed_workspace != sealed_workspace:
+            raise RuntimeFailure("source-write probe workspace drifted before actor launch")
+
+    return source_launch_fence
+
+
 def _probe_source_write_command(
     root: Path,
     auth_source: Path,
@@ -4878,8 +5052,12 @@ def _probe_source_write_command(
 ) -> dict[str, Any]:
     """Produce one live, raw-evidence-backed source-write capability receipt."""
 
-    root = Path(root).resolve()
-    probe_root = root / "evidence" / "source-write-probe"
+    root = Path(root).resolve(strict=True)
+    try:
+        _secure_private_directory(root, ("evidence",))
+        probe_root = _secure_private_directory(root, ("evidence", "source-write-probe"))
+    except (OSError, SourceWriteError) as exc:
+        raise RuntimeFailure(f"source-write probe control root is unsafe: {exc}") from exc
     codex_path, codex_sha256, codex_version = _codex_identity(codex_binary)
     evidence_ref = "evidence/source-write-capability.json"
     evidence_path = root / evidence_ref
@@ -4910,18 +5088,22 @@ def _probe_source_write_command(
             },
             "replayed": True,
         }
-    workspace = probe_root / "workspace"
-    allowed_root = workspace / "src/api"
-    git_root = workspace / ".git"
-    sibling = probe_root / "sibling"
-    for directory in (allowed_root, git_root, sibling):
-        directory.mkdir(parents=True, exist_ok=True)
+    try:
+        workspace = _secure_private_directory(probe_root, ("workspace",))
+        allowed_root = _secure_private_directory(probe_root, ("workspace", "src", "api"))
+        git_root = _secure_private_directory(probe_root, ("workspace", ".git"))
+        sibling = _secure_private_directory(probe_root, ("sibling",))
+        _secure_private_directory(probe_root, ("schemas",))
+    except (OSError, SourceWriteError) as exc:
+        raise RuntimeFailure(f"source-write probe workspace is unsafe: {exc}") from exc
+    source_launch_fence = _seal_source_write_probe_launch_fence(workspace)
     control_secret = probe_root / "control-secret.txt"
-    control_secret.write_text("control-probe\n")
+    _create_once_or_verify_bytes(probe_root, "control-secret.txt", b"control-probe\n")
     schema = probe_root / "schemas/output.json"
-    schema.parent.mkdir(parents=True, exist_ok=True)
-    schema.write_text(
-        json.dumps(
+    _create_once_or_verify_bytes(
+        probe_root,
+        "schemas/output.json",
+        (json.dumps(
             {
                 "type": "object",
                 "additionalProperties": False,
@@ -4930,7 +5112,7 @@ def _probe_source_write_command(
             },
             sort_keys=True,
         )
-        + "\n"
+        + "\n").encode(),
     )
     codex_home = _prepare_codex_home(
         probe_root,
@@ -4964,6 +5146,7 @@ def _probe_source_write_command(
         "_runtime_boot_identity": _process_identity(1),
         "_runtime_generation_id": "generation-probe",
         "_runtime_phase_id": "000-source-write-probe",
+        "_runtime_source_launch_fence": source_launch_fence,
     }
     raw: RawExecution | None = None
     try:
