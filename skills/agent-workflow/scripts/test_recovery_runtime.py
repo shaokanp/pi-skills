@@ -625,6 +625,53 @@ class RecoveryRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RecoveryError, "unfinished committed phase"):
                 seal_resume_brief(root, workflow, "generation-002")
 
+    def test_reconcile_exclusion_requires_exact_claim_plan_and_sole_unfinished_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workflow, initial = self.initial(root)
+            claim_path = next((root / "generations/claims").glob("*.json"))
+            original_claim = claim_path.read_bytes()
+
+            forged_claim = json.loads(original_claim)
+            forged_claim["workflow_id"] = "forged-workflow"
+            claim_path.write_bytes(canonical(forged_claim))
+            with self.assertRaisesRegex(RecoveryError, "exact plan authority"):
+                prepare_phase_authority(root, workflow, initial, reconciling=True)
+
+            claim_path.write_bytes(original_claim)
+            drifted_plan = deepcopy(initial)
+            drifted_plan["phase_budget_seconds"] += 1
+            drifted_payload = canonical(drifted_plan)
+            (root / "phases/001-research/plan.json").write_bytes(drifted_payload)
+            paired_claim = json.loads(original_claim)
+            paired_claim["plan_sha256"] = digest(drifted_payload)
+            claim_path.write_bytes(canonical(paired_claim))
+            with self.assertRaisesRegex(RecoveryError, "plan drifted"):
+                prepare_phase_authority(root, workflow, initial, reconciling=True)
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workflow, initial = self.initial(root)
+            self.terminal_result(root, initial, completed=True)
+            current = deepcopy(initial)
+            current["phase_id"] = "002-current"
+            current["generation_id"] = "generation-002"
+            current["caused_by"] = [initial["phase_id"]]
+            current["predecessor_sha256"] = causal_predecessor_sha256(
+                root, current["caused_by"]
+            )
+            create_once_json(root, "phases/002-current/plan.json", current)
+            self.commit_plan_claim(root, workflow, current)
+
+            unrelated = deepcopy(initial)
+            unrelated["phase_id"] = "009-unrelated"
+            unrelated["generation_id"] = "generation-009"
+            unrelated["predecessor_sha256"] = "sha256:" + "9" * 64
+            create_once_json(root, "phases/009-unrelated/plan.json", unrelated)
+            self.commit_plan_claim(root, workflow, unrelated)
+            with self.assertRaisesRegex(RecoveryError, "unfinished committed phase"):
+                prepare_phase_authority(root, workflow, current, reconciling=True)
+
     def test_resume_rejects_forged_terminal_file_without_reconcile_proof(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

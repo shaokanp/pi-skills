@@ -71,6 +71,13 @@ manifest. A tracked worktree deletion is represented as an absent snapshot file,
 not treated as an infrastructure error. Source files are copied from no-follow
 file descriptors, and canonical repository state is checked before and after
 materialization so a pathname replacement cannot expose a foreign target.
+When an additional Phase reaches its terminal fence or deterministic crash
+reconciliation, resume projection may exclude only that Phase's exact committed
+winning plan while revalidating its authority. The persisted plan's canonical
+bytes and the expected claim path, workflow/generation identity, predecessor,
+authority revision, contention key, and complete canonical claim bytes must all
+match. A missing current claim or any other unfinished committed Phase remains a
+fail-closed blocker.
 The host probe binds only portable Phase-runner capabilities: the OS terminal
 barrier plus each routed worker's supervisor request/terminal, exact command and
 sanitized environment, canonical rollout, route, permissions, and token usage.

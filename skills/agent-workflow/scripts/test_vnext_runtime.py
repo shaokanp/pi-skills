@@ -39,7 +39,12 @@ from source_workspace import (
     writer_profile_bytes,
 )
 from phase_protocol import ProtocolError, _validate_source_patch_replay, validate_contract
-from recovery_runtime import causal_predecessor_sha256
+from recovery_runtime import (
+    RecoveryError,
+    causal_predecessor_sha256,
+    prepare_phase_authority,
+    seal_resume_brief,
+)
 from workflow_runtime import (
     _RUNTIME_BUNDLE_FILES,
     CodexExecConfig,
@@ -1828,6 +1833,90 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             with self.assertRaisesRegex(RuntimeFailure, "exactly one initial phase"):
                 run_read_only_phase(root, plan, execute, max_parallel=2)
 
+    def test_additional_phase_terminal_fence_excludes_only_its_committed_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            initial = self.build_run(root, task_count=1)
+
+            def execute(task: dict[str, object], packet: dict[str, object]) -> RawExecution:
+                session_id = f"session-{task['task_id']}"
+                model = "gpt-5.6-sol" if task["role"] == "top" else "gpt-5.6-terra"
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": session_id},
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": json.dumps({"answer": packet["prompt"]}),
+                            },
+                        },
+                        {
+                            "type": "turn.completed",
+                            "usage": {"input_tokens": 10, "output_tokens": 2},
+                        },
+                    ],
+                    stderr="",
+                    turn_context={
+                        "model": model,
+                        "effort": "xhigh",
+                        "session_id": session_id,
+                    },
+                )
+
+            first = run_read_only_phase(root, initial, execute, max_parallel=1)
+            self.assertEqual(first["status"], "completed")
+
+            second = deepcopy(initial)
+            second["phase_id"] = "002-followup"
+            second["generation_id"] = "generation-002"
+            second["caused_by"] = ["001-research"]
+            second["predecessor_sha256"] = causal_predecessor_sha256(
+                root, second["caused_by"]
+            )
+            task = second["tasks"][0]
+            task["task_id"] = "verify-followup"
+            task["lineage_id"] = "lineage-followup"
+            task["role"] = "top"
+            task["packet_path"] = "phases/002-followup/tasks/verify-followup/packet.json"
+            causal_ref = "phases/001-research/receipt.json"
+            task["input_refs"] = [causal_ref]
+            task["input_sha256"] = {causal_ref: digest((root / causal_ref).read_bytes())}
+            packet = {
+                "schema_version": "agent-workflow.task-packet.vnext.v1",
+                "prompt": "Verify the completed prior phase.",
+                "output_schema_ref": "schemas/worker-output.json",
+                "output_schema_sha256": digest((root / "schemas/worker-output.json").read_bytes()),
+            }
+            packet_payload = (
+                json.dumps(packet, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            packet_path = root / task["packet_path"]
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_bytes(packet_payload)
+            task["packet_sha256"] = digest(packet_payload)
+            workflow = json.loads((root / "workflow.json").read_text())
+            seal_resume_brief(root, workflow, second["generation_id"])
+
+            with self.assertRaisesRegex(
+                RecoveryError,
+                "exact committed generation claim",
+            ):
+                prepare_phase_authority(root, workflow, second, reconciling=True)
+
+            summary = run_read_only_phase(
+                root,
+                second,
+                execute,
+                max_parallel=1,
+                terminal_fence=lambda: prepare_phase_authority(
+                    root, workflow, second, reconciling=True
+                ),
+            )
+            self.assertEqual(summary["status"], "completed")
+            self.assertTrue((root / "phases/002-followup/receipt.json").is_file())
+
     def test_failed_initial_lineage_runs_one_evidence_bound_recovery_phase(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -2381,6 +2470,144 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
             self.assertTrue((root / summary["receipt_ref"]).is_file())
             result = json.loads(
                 (root / "phases/001-research/tasks/research-1/result.json").read_text()
+            )
+            self.assertEqual(result["changed_paths"], ["src/value.txt"])
+
+    def test_additional_source_phase_reconcile_integrates_and_publishes_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "fixture@example.com"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Fixture"],
+                cwd=repository,
+                check=True,
+            )
+            (repository / "src").mkdir()
+            target = repository / "src/value.txt"
+            target.write_text("base\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+            baseline = self.source_baseline(repository)
+            baseline_payload = baseline_gate._canonical(baseline)
+
+            root = repository / ".workflow/run"
+            initial = self.build_run(root, task_count=1)
+            workflow = json.loads((root / "workflow.json").read_text())
+            workflow["success_criteria"].append(
+                {"id": "AC-2", "description": "Additional source work is integrated."}
+            )
+            workflow["admission"]["profile"] = "source_write"
+            workflow["admission"]["capabilities"]["sandbox_isolation"]["status"] = "pass"
+            workflow["baseline_sha256"] = digest(baseline_payload)
+            workflow["admission"]["repository"] = baseline_gate.repository_evidence(baseline)
+            (root / workflow["baseline_ref"]).write_bytes(baseline_payload)
+            (root / "workflow.json").write_text(
+                json.dumps(workflow, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            initial["predecessor_sha256"] = digest(baseline_payload)
+            initial_task = initial["tasks"][0]
+            initial_task["input_sha256"] = {
+                workflow["baseline_ref"]: digest(baseline_payload)
+            }
+
+            def raw_execution(task: dict[str, object], text: str) -> RawExecution:
+                session_id = f"session-{task['task_id']}"
+                return RawExecution(
+                    exit_code=0,
+                    events=[
+                        {"type": "thread.started", "thread_id": session_id},
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": json.dumps({"answer": text}),
+                            },
+                        },
+                        {
+                            "type": "turn.completed",
+                            "usage": {"input_tokens": 10, "output_tokens": 2},
+                        },
+                    ],
+                    stderr="",
+                    turn_context={
+                        "model": "gpt-5.6-terra",
+                        "effort": "xhigh",
+                        "session_id": session_id,
+                    },
+                )
+
+            first = run_read_only_phase(
+                root,
+                initial,
+                lambda task, _packet: raw_execution(task, "discovered"),
+                max_parallel=1,
+            )
+            self.assertEqual(first["status"], "completed")
+
+            second = deepcopy(initial)
+            second["phase_id"] = "002-write"
+            second["generation_id"] = "generation-002"
+            second["caused_by"] = ["001-research"]
+            second["predecessor_sha256"] = causal_predecessor_sha256(
+                root, second["caused_by"]
+            )
+            task = second["tasks"][0]
+            task["task_id"] = "write-followup"
+            task["lineage_id"] = "lineage-write-followup"
+            task["criterion_id"] = "AC-2"
+            task["work_mode"] = "write"
+            task["write_roots"] = ["src"]
+            task["packet_path"] = "phases/002-write/tasks/write-followup/packet.json"
+            causal_ref = "phases/001-research/receipt.json"
+            task["input_refs"] = [causal_ref]
+            task["input_sha256"] = {causal_ref: digest((root / causal_ref).read_bytes())}
+            packet = {
+                "schema_version": "agent-workflow.task-packet.vnext.v1",
+                "prompt": "Write the bounded follow-up.",
+                "output_schema_ref": "schemas/worker-output.json",
+                "output_schema_sha256": digest((root / "schemas/worker-output.json").read_bytes()),
+            }
+            packet_payload = (
+                json.dumps(packet, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            packet_path = root / task["packet_path"]
+            packet_path.parent.mkdir(parents=True)
+            packet_path.write_bytes(packet_payload)
+            task["packet_sha256"] = digest(packet_payload)
+            seal_resume_brief(root, workflow, second["generation_id"])
+
+            source_phase = prepare_isolated_phase(
+                root,
+                repository,
+                second,
+                admission_baseline=baseline,
+            )
+            (source_phase.tasks["write-followup"].root / "src/value.txt").write_text(
+                "worker\n"
+            )
+            plan_path = create_once_json(root, "phases/002-write/plan.json", second)
+            _seal_generation_claim(root, workflow, second, plan_path.read_bytes())
+            execution = raw_execution(task, "written")
+
+            summary = run_read_only_phase(
+                root,
+                second,
+                lambda _task, _packet: execution,
+                max_parallel=1,
+                reconciled_executions={"write-followup": execution},
+                source_phase=source_phase,
+            )
+            self.assertEqual(summary["status"], "completed")
+            self.assertEqual(target.read_text(), "worker\n")
+            self.assertTrue((root / "phases/002-write/receipt.json").is_file())
+            result = json.loads(
+                (root / "phases/002-write/tasks/write-followup/result.json").read_text()
             )
             self.assertEqual(result["changed_paths"], ["src/value.txt"])
 

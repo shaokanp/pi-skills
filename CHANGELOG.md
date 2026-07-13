@@ -39,6 +39,11 @@
   command claims must match a typed receipt for the latest applied integration.
 - Accepted Codex's lazy omission of its actor-owned `arg0` wrapper for no-tool
   probes while continuing to reject duplicate or foreign runtime read paths.
+- Fixed additional-Phase terminal and crash reconciliation so the exact current
+  winning plan is excluded from the resume projection only while its committed
+  authority is being revalidated. The fence now reconstructs the canonical plan,
+  claim path, contention key, and full claim bytes before source integration;
+  unrelated unfinished plans still fail closed.
 
 - Added a portable/strict-local session doctor, fail-closed new-skill scaffold,
   bilingual guide checks, and deterministic registry/changelog version markers.

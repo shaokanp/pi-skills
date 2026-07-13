@@ -588,6 +588,10 @@ resume chain或 execution。若 winning claim已存在但 lineage claim、reques
 補回可證明的 create-once claim，或在 request identity、generation claim、process-record absence與 audit-marker
 absence都成立時把未啟動 task terminalize為 `not_started_interrupted`，再允許 seal resume brief。既有 watchdog
 terminal不得只靠 path existence；reconcile必須重驗 schema、request/active/log digests與 worker/marker liveness。
+Additional Phase的 terminal fence／reconcile在重驗當前 exact committed winning plan時，可只從unfinished
+projection排除該當前Phase；排除前必須重建canonical plan bytes、expected claim path、workflow／generation、
+predecessor、authority revision、contention key與完整claim bytes。若current claim缺失、任一binding漂移或另有
+unfinished committed Phase，仍須fail closed。
 Resume brief每個 generation create-once，且 displaced source evidence必須在每次 seal前重新驗 retained tree digest；
 `cleanup_allowed=false`直到 human resolution。
 
