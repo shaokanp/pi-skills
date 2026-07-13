@@ -14,6 +14,6 @@ while IFS= read -r variable; do
   unset "$variable"
 done < <(git rev-parse --local-env-vars)
 
-bash "$ROOT/scripts/validate-all.sh"
+GIT_INDEX_FILE="$COMMIT_INDEX" git -C "$ROOT" diff --cached --check
 GIT_INDEX_FILE="$COMMIT_INDEX" \
   bash "$ROOT/scripts/check-public.sh" --index --require-local-markers

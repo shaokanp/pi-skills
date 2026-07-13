@@ -77,7 +77,8 @@ For a Claude Code skills directory, pass that directory explicitly as
    an `unreleased` marker under `## Unreleased`, or a `release` marker under a
    dated release heading. The validator cannot infer behavior changes from a
    Git diff, so maintainers must make that version decision explicitly.
-4. Follow `CONTRIBUTING.md` and run the complete preflight:
+4. During development, run focused tests for the seam being changed. After the
+   source tree is frozen, run the complete preflight once:
 
 ```bash
 bash scripts/preflight.sh
@@ -97,7 +98,18 @@ local release; use `publish-preflight.sh` for the Gitleaks-backed publish gate.
 
 The preflight validates every registered skill, scans the publishable tree for
 private paths and common secret formats, builds release archives under `dist/`,
-and scans generated artifact metadata before it can be published.
+and scans generated artifact metadata before it can be published. A passing
+receipt is stored in the worktree's Git metadata and binds the exact public
+tree, toolchain, local policy, and validator. Repeating pre-push or local-release
+steps for the same fingerprint reuses that receipt; any relevant byte or
+environment change invalidates it.
+
+Heavy Agent Workflow validation is executed through a lease-bound temporary
+root. Local macOS runs default to `/Volumes/OWC-4TB/tmp/pi-skills` only after a
+device-identity mount check; CI uses its explicit `RUNNER_TEMP`, and maintainers
+may set an existing `PI_SKILLS_TMP_ROOT`. If no policy-managed root is available,
+validation fails closed instead of silently filling the boot disk. See
+[`docs/agent-workflow-canary-storage.md`](docs/agent-workflow-canary-storage.md).
 
 ## Local Production
 
@@ -135,7 +147,8 @@ Run the strict publish gate before the first public push:
 bash scripts/publish-preflight.sh
 ```
 
-The pre-commit hook scans the staged Git index. The pre-push hook reads Git's
+The pre-commit hook runs only fast diff/static and staged-index safety checks.
+The pre-push hook runs or reuses the complete preflight, then reads Git's
 ref update stream and scans the commits and annotated tags actually being sent;
 on the first push to an empty remote, that means the complete reachable history.
 The strict publish gate also runs Gitleaks against an archive of the tracked

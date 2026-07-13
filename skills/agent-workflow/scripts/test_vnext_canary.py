@@ -6,12 +6,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 from unittest import mock
 
@@ -56,6 +58,38 @@ import run_vnext_canary  # noqa: E402
 from vnext_accounting import SUPPORTED_APP_SCHEMA_SHA256, SUPPORTED_CODEX_VERSION  # noqa: E402
 
 
+def _make_tree_removable(root: Path) -> None:
+    if not root.exists():
+        return
+    root.chmod(0o700)
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            continue
+        path.chmod(0o700 if path.is_dir() else 0o600)
+
+
+class TemporaryDirectory:
+    """Own one Canary case, including stores that must sit outside its workspace."""
+
+    def __init__(self, *, dir: str | Path | None = None) -> None:
+        self._outer = tempfile.TemporaryDirectory(
+            prefix="agent-workflow-canary-case-",
+            dir=dir,
+        )
+        self._outer_root: Path | None = None
+
+    def __enter__(self) -> str:
+        self._outer_root = Path(self._outer.__enter__()).resolve()
+        workspace = self._outer_root / "workspace"
+        workspace.mkdir(mode=0o700)
+        return str(workspace)
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if self._outer_root is not None:
+            _make_tree_removable(self._outer_root)
+        self._outer.__exit__(exc_type, exc, traceback)
+
+
 def write_json(path: Path, value: object) -> tuple[str, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(_canonical_json(value) + b"\n")
@@ -64,6 +98,25 @@ def write_json(path: Path, value: object) -> tuple[str, str]:
 
 def relative_evidence(root: Path, path: Path) -> tuple[str, str]:
     return path.relative_to(root).as_posix(), _sha256(path.read_bytes())
+
+
+def canary_residue_usage(root: Path) -> dict[str, int]:
+    candidates = [
+        path
+        for path in root.iterdir()
+        if path.name.startswith(".canary-") or path.name == ".agent-workflow-canary-control"
+    ]
+    files = [
+        child
+        for candidate in candidates
+        for child in ([candidate] if candidate.is_file() else candidate.rglob("*"))
+        if child.is_file()
+    ]
+    return {
+        "top_level": len(candidates),
+        "files": len(files),
+        "bytes": sum(path.stat().st_size for path in files),
+    }
 
 
 def canonical_session_root(root: Path) -> Path:
@@ -1104,6 +1157,31 @@ def write_host_results(root: Path, seal_path: Path, core: dict[str, object], ste
 
 
 class VNextCanaryTests(unittest.TestCase):
+    def test_canary_cases_leave_zero_residue_after_normal_failure_and_readonly_teardown(self) -> None:
+        with tempfile.TemporaryDirectory() as policy_tmp:
+            policy_root = Path(policy_tmp).resolve()
+            baseline = canary_residue_usage(policy_root)
+            self.assertEqual(baseline, {"top_level": 0, "files": 0, "bytes": 0})
+
+            for scenario in ("normal", "failure", "readonly"):
+                with self.subTest(scenario=scenario):
+                    if scenario == "failure":
+                        with self.assertRaisesRegex(RuntimeError, "fixture failure"):
+                            with TemporaryDirectory(dir=policy_root) as raw:
+                                write_authority(Path(raw).resolve(), "sha256:" + "a" * 64)
+                                raise RuntimeError("fixture failure")
+                    else:
+                        with TemporaryDirectory(dir=policy_root) as raw:
+                            root = Path(raw).resolve()
+                            write_authority(root, "sha256:" + "a" * 64)
+                            if scenario == "readonly":
+                                readonly = root / "readonly-fixture"
+                                readonly.mkdir()
+                                (readonly / "evidence.json").write_text("{}\n", encoding="utf-8")
+                                (readonly / "evidence.json").chmod(0o400)
+                                readonly.chmod(0o500)
+                    self.assertEqual(canary_residue_usage(policy_root), baseline)
+
     def test_effective_worker_profile_cannot_cover_a_canonical_store(self) -> None:
         with TemporaryDirectory() as raw:
             root = Path(raw).resolve()
@@ -2780,4 +2858,22 @@ class VNextCanaryTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if os.environ.get("PI_SKILLS_VALIDATION_TMP_ACTIVE") != "1":
+        wrapper = SCRIPT_DIR / "validation_tmp.py"
+        command = [sys.executable, "-B", str(Path(__file__).resolve()), *sys.argv[1:]]
+        raise SystemExit(
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    str(wrapper),
+                    "run",
+                    "--repo",
+                    str(SCRIPT_DIR.parents[2]),
+                    "--",
+                    *command,
+                ],
+                check=False,
+            ).returncode
+        )
     unittest.main(verbosity=2)
