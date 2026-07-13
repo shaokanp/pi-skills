@@ -47,6 +47,7 @@ from workflow_runtime import (
     _drain_stream,
     _attest_worker_permissions,
     _prepare_codex_home,
+    _probe_host_capabilities_command,
     _probe_runtime_refs,
     _parse_jsonl,
     _process_identity,
@@ -61,6 +62,7 @@ from workflow_runtime import (
     _scrub_stale_codex_auth,
     _validate_typed_output,
     _validate_admission_inputs,
+    _validate_host_capability_provenance,
     _validate_source_write_capability,
     cancel_run,
     codex_task_executor,
@@ -137,6 +139,483 @@ def capability_receipt(
 
 
 class ReadOnlyTracerTests(unittest.TestCase):
+    def test_public_cli_exposes_fresh_host_capability_materializer(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            main(["probe-host-capabilities", "--help"])
+        self.assertEqual(raised.exception.code, 0)
+
+    def test_host_capability_receipt_replays_routes_permissions_tokens_and_denials(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            worker_root = root / "repo" / "src"
+            worker_root.mkdir(parents=True)
+            schema_path = root / "evidence" / "host-capability-probe" / "output-schema.json"
+            schema_path.parent.mkdir(parents=True)
+            schema_path.write_text(
+                '{"additionalProperties":false,"properties":{"answer":{"const":"probe-ok","type":"string"}},"required":["answer"],"type":"object"}\n'
+            )
+            codex_binary = root / "codex-release" / "bin" / "codex"
+            runtime_zsh = root / "codex-release" / "codex-resources" / "zsh" / "bin" / "zsh"
+            codex_binary.parent.mkdir(parents=True)
+            runtime_zsh.parent.mkdir(parents=True)
+            codex_binary.write_text("fixture\n")
+            runtime_zsh.write_text("fixture\n")
+            artifacts: dict[str, tuple[str, str]] = {}
+
+            def write(relative: str, value: object) -> tuple[str, str]:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                payload = (
+                    value
+                    if isinstance(value, bytes)
+                    else (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                )
+                path.write_bytes(payload)
+                result = (relative, digest(payload))
+                artifacts[relative] = result
+                return result
+
+            sessions: dict[str, object] = {}
+            for role, model in (("worker", "gpt-5.6-terra"), ("top", "gpt-5.6-sol")):
+                session_id = f"{role}-session"
+                codex_home = root / "evidence" / "host-capability-probe" / f"{role}-home"
+                arg0 = codex_home / "tmp" / "arg0" / "codex-arg0fixture"
+                arg0.parent.mkdir(parents=True)
+                arg0.write_text("fixture\n")
+                profile = {
+                    "type": "managed",
+                    "network": "restricted",
+                    "file_system": {
+                        "type": "restricted",
+                        "entries": [
+                            {"path": {"type": "special", "value": {"kind": "minimal"}}, "access": "read"},
+                            {"path": {"type": "path", "path": os.fspath(worker_root)}, "access": "read"},
+                            {"path": {"type": "path", "path": os.fspath(runtime_zsh)}, "access": "read"},
+                            {"path": {"type": "path", "path": os.fspath(arg0)}, "access": "read"},
+                        ],
+                    },
+                }
+                context = {
+                    "model": model,
+                    "effort": "xhigh",
+                    "session_id": session_id,
+                    "workspace_roots": [os.fspath(worker_root)],
+                    "sandbox_policy": {"type": "read-only"},
+                    "permission_profile": profile,
+                }
+                events = b"".join(
+                    (json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                    for item in (
+                        {"type": "thread.started", "thread_id": session_id},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"probe-ok"}'}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+                    )
+                )
+                events_ref, events_sha = write(f"evidence/{role}-events.jsonl", events)
+                context_ref, context_sha = write(f"evidence/{role}-context.json", context)
+                output_ref, output_sha = write(f"evidence/{role}-output.json", {"answer": "probe-ok"})
+                request_ref, request_sha = write(f"runtime/{role}-request.json", {"role": role})
+                terminal_ref, terminal_sha = write(f"runtime/{role}-terminal.json", {"role": role})
+                rollout = codex_home / "sessions" / "2026" / "07" / "13" / f"{session_id}.jsonl"
+                rollout.parent.mkdir(parents=True)
+                rollout.write_bytes(
+                    b"".join(
+                        (json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                        for item in (
+                            {"type": "session_meta", "payload": {"id": session_id}},
+                            {"type": "turn_context", "payload": context},
+                        )
+                    )
+                )
+                sessions[role] = {
+                    "session_id": session_id,
+                    "model": model,
+                    "reasoning_effort": "xhigh",
+                    "codex_home": os.fspath(codex_home),
+                    "events_ref": events_ref,
+                    "events_sha256": events_sha,
+                    "turn_context_ref": context_ref,
+                    "turn_context_sha256": context_sha,
+                    "output_ref": output_ref,
+                    "output_sha256": output_sha,
+                    "supervisor_request_ref": request_ref,
+                    "supervisor_request_sha256": request_sha,
+                    "supervisor_terminal_ref": terminal_ref,
+                    "supervisor_terminal_sha256": terminal_sha,
+                    "rollout_path": os.fspath(rollout),
+                    "rollout_bytes": rollout.stat().st_size,
+                    "rollout_sha256": digest(rollout.read_bytes()),
+                }
+
+            denial_ref, denial_sha = write(
+                "evidence/denials.json",
+                {
+                    "workspace_read_exit": 0,
+                    "workspace_write_exit": 1,
+                    "sibling_read_exit": 1,
+                    "control_read_exit": 1,
+                    "credential_read_exit": 1,
+                    "network_exit": 1,
+                },
+            )
+            names = [
+                "test_cancel_rejects_record_without_live_unforgeable_marker",
+                "test_cancel_signals_active_group_and_terminalizes_queued_task",
+                "test_generation_claim_uses_one_predecessor_authority_contention_key",
+                "test_log_drainer_caps_event_object_count_even_within_durable_limit",
+                "test_runner_sigkill_reconcile_materializes_task_and_phase_receipt",
+                "test_terminal_fence_runs_after_workers_and_before_results_or_receipt",
+            ]
+            tests_ref, tests_sha = write(
+                "evidence/focused-tests.txt",
+                ("\n".join(f"{name} ... ok" for name in names) + "\n\nOK\n").encode(),
+            )
+            now = datetime.now(timezone.utc)
+            receipt = {
+                "schema_version": "agent-workflow.host-capability-receipt.v1",
+                "observed_at": now.isoformat().replace("+00:00", "Z"),
+                "producer": {
+                    "name": "agent-workflow-host-capability-probe",
+                    "runtime_bundle_sha256": _runtime_bundle_sha256(),
+                    "codex_cli_version": "fixture",
+                    "codex_binary_sha256": "sha256:" + "2" * 64,
+                },
+                "relevant_root": os.fspath(worker_root),
+                "execution": {
+                    "started_at": now.isoformat().replace("+00:00", "Z"),
+                    "finished_at": now.isoformat().replace("+00:00", "Z"),
+                    "role_count": 2,
+                    "terminal_count": 2,
+                },
+                "sessions": sessions,
+                "deterministic_denials": {"evidence_ref": denial_ref, "evidence_sha256": denial_sha},
+                "focused_tests": {"evidence_ref": tests_ref, "evidence_sha256": tests_sha},
+                "capabilities": {
+                    name: "unavailable" if name == "sandbox_isolation" else "pass"
+                    for name in workflow_runtime.CAPABILITY_NAMES
+                },
+            }
+            command_suffixes: dict[str, list[str]] = {"worker": [], "top": []}
+            terminal_stdout_overrides: dict[str, str | None] = {"worker": None, "top": None}
+
+            def load_request(_root: Path, ref: str, *, enforce_boot: bool = True):
+                role = json.loads((root / ref).read_text())["role"]
+                session = sessions[role]
+                model = session["model"]
+                codex_home = session["codex_home"]
+                marker = f"agent-workflow:fixture:{role}"
+                command = workflow_runtime._host_probe_command(
+                    codex_binary=os.fspath(codex_binary),
+                    model=model,
+                    audit_marker=marker,
+                    output_schema=schema_path,
+                    worker_root=worker_root,
+                ) + command_suffixes[role]
+                request = {
+                    "codex_binary": os.fspath(codex_binary),
+                    "command": command,
+                    "command_sha256": digest(
+                        (json.dumps(command, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                    ),
+                    "environment": {
+                        "AGENT_WORKFLOW_AUDIT_MARKER": marker,
+                        "CODEX_HOME": codex_home,
+                        "HOME": os.fspath(Path(codex_home) / "home"),
+                        "LANG": "C.UTF-8",
+                        "PATH": "/usr/bin:/bin",
+                        "TMPDIR": os.fspath(Path(codex_home) / "tmp"),
+                    },
+                    "audit_marker": marker,
+                    "work_mode": "read",
+                    "write_roots": [],
+                    "runtime_bundle_sha256": _runtime_bundle_sha256(),
+                    "codex_binary_sha256": "sha256:" + "2" * 64,
+                    "stdout_ref": session["events_ref"],
+                    "stderr_ref": session["events_ref"],
+                }
+                return request, (root / ref).read_bytes()
+
+            def validate_terminal(value: dict[str, object]):
+                role = value["role"]
+                session = sessions[role]
+                return {
+                    "request_ref": session["supervisor_request_ref"],
+                    "request_sha256": session["supervisor_request_sha256"],
+                    "status": "completed",
+                    "exit_code": 0,
+                    "group_reaped": True,
+                    "group_gone_observed": True,
+                    "stdout_ref": session["events_ref"],
+                    "stdout_sha256": terminal_stdout_overrides[role] or session["events_sha256"],
+                    "stderr_ref": session["events_ref"],
+                }
+
+            def validate(value: dict[str, object]) -> None:
+                with (
+                    mock.patch("workflow_runtime.load_supervisor_request", side_effect=load_request),
+                    mock.patch("workflow_runtime.validate_supervisor_receipt", side_effect=validate_terminal),
+                ):
+                    _validate_host_capability_provenance(
+                        root,
+                        value,
+                        running_bundle=_runtime_bundle_sha256(),
+                        codex_sha256="sha256:" + "2" * 64,
+                        codex_version="fixture",
+                        worker_root=worker_root,
+                    )
+
+            validate(receipt)
+            tampered = deepcopy(receipt)
+            tampered["execution"]["terminal_count"] = 1
+            with self.assertRaisesRegex(RuntimeFailure, "blocking barrier"):
+                validate(tampered)
+            tampered = deepcopy(receipt)
+            tampered["sessions"]["worker"]["model"] = "gpt-5.6-sol"
+            with self.assertRaisesRegex(RuntimeFailure, "route attestation"):
+                validate(tampered)
+            stale = deepcopy(receipt)
+            stale["observed_at"] = "2020-01-01T00:00:00Z"
+            with self.assertRaisesRegex(RuntimeFailure, "stale"):
+                validate(stale)
+            command_suffixes["worker"] = ["--dangerously-extra"]
+            with self.assertRaisesRegex(RuntimeFailure, "command is not exact"):
+                validate(receipt)
+            command_suffixes["worker"] = []
+            terminal_stdout_overrides["worker"] = "sha256:" + "9" * 64
+            with self.assertRaisesRegex(RuntimeFailure, "routed evidence"):
+                validate(receipt)
+            terminal_stdout_overrides["worker"] = None
+            worker_rollout = Path(sessions["worker"]["rollout_path"])
+            rollout_events = [json.loads(line) for line in worker_rollout.read_text().splitlines()]
+            rollout_events[-1]["payload"]["model"] = "gpt-5.6-sol"
+            worker_rollout.write_text(
+                "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in rollout_events)
+            )
+            sessions["worker"]["rollout_bytes"] = worker_rollout.stat().st_size
+            sessions["worker"]["rollout_sha256"] = digest(worker_rollout.read_bytes())
+            with self.assertRaisesRegex(RuntimeFailure, "routed evidence"):
+                validate(receipt)
+            rollout_events[-1]["payload"]["model"] = "gpt-5.6-terra"
+            worker_rollout.write_text(
+                "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in rollout_events)
+            )
+            sessions["worker"]["rollout_bytes"] = worker_rollout.stat().st_size
+            sessions["worker"]["rollout_sha256"] = digest(worker_rollout.read_bytes())
+            worker_rollout = Path(sessions["worker"]["rollout_path"])
+            worker_rollout.write_text(worker_rollout.read_text() + "{}\n")
+            with self.assertRaisesRegex(RuntimeFailure, "canonical rollout"):
+                validate(receipt)
+
+    def test_host_capability_receipt_only_crash_recovers_summary_and_scrubs_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw) / "repo"
+            (repository / ".git").mkdir(parents=True)
+            (repository / "src").mkdir()
+            root = repository / ".workflow" / "run"
+            (root / "evidence").mkdir(parents=True)
+            auth_path = root / "runtime" / "codex-homes" / "host-capability-worker" / "auth.json"
+            auth_path.parent.mkdir(parents=True)
+            auth_path.write_text('{"tokens":{"access_token":"fixture"}}\n')
+            auth_path.chmod(0o600)
+            statuses = {
+                name: "unavailable" if name == "sandbox_isolation" else "pass"
+                for name in workflow_runtime.CAPABILITY_NAMES
+            }
+            receipt = {
+                "schema_version": "agent-workflow.host-capability-receipt.v1",
+                "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "producer": {},
+                "relevant_root": os.fspath(repository / "src"),
+                "execution": {},
+                "sessions": {},
+                "deterministic_denials": {},
+                "focused_tests": {},
+                "capabilities": statuses,
+            }
+            receipt_path = root / "evidence" / "host-capability-receipt.json"
+            receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n")
+            binary = Path(sys.executable).resolve()
+            identity = (binary, digest(binary.read_bytes()), "codex fixture")
+            with (
+                mock.patch("workflow_runtime._codex_identity", return_value=identity),
+                mock.patch("workflow_runtime._validate_host_capability_provenance"),
+            ):
+                result = _probe_host_capabilities_command(
+                    root,
+                    repository,
+                    "src",
+                    root / "unused-auth.json",
+                    os.fspath(binary),
+                )
+                self.assertTrue(result["replayed"])
+                self.assertFalse(auth_path.exists())
+                summary_path = root / result["evidence_ref"]
+                self.assertTrue(summary_path.is_file())
+                summary = json.loads(summary_path.read_text())
+                self.assertEqual(
+                    result["capability_bindings"]["blocking_wait"]["evidence_ref"],
+                    "evidence/host-capability-summary.json",
+                )
+                summary["capabilities"]["blocking_wait"]["status"] = "blocked"
+                summary_path.write_text(
+                    json.dumps(summary, sort_keys=True, separators=(",", ":")) + "\n"
+                )
+                with self.assertRaisesRegex(RuntimeFailure, "summary drifted"):
+                    _probe_host_capabilities_command(
+                        root,
+                        repository,
+                        "src",
+                        root / "unused-auth.json",
+                        os.fspath(binary),
+                    )
+
+    def test_host_capability_pre_receipt_crash_uses_one_recovery_and_replays_exact_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            request = (
+                root
+                / "runtime/watchdogs/000-host-capability-probe"
+                / "host-capability-worker/request.json"
+            )
+            request.parent.mkdir(parents=True)
+            request.write_text("{}\n")
+            task_id, observed = workflow_runtime._select_host_probe_attempt(root, "worker")
+            self.assertEqual(task_id, "host-capability-worker-recovery")
+            self.assertIsNone(observed)
+
+            recovery_request = request.parent.parent / "host-capability-worker-recovery/request.json"
+            recovery_request.parent.mkdir(parents=True)
+            recovery_request.write_text("{}\n")
+            with self.assertRaisesRegex(RuntimeFailure, "partial attempt"):
+                workflow_runtime._select_host_probe_attempt(root, "worker")
+
+            relative = "evidence/host-capability-probe/worker-events.jsonl"
+            payload = b'{"type":"thread.started","thread_id":"worker"}\n'
+            first = workflow_runtime._create_once_or_verify_bytes(root, relative, payload)
+            second = workflow_runtime._create_once_or_verify_bytes(root, relative, payload)
+            self.assertEqual(first, second)
+            first.write_bytes(payload + b"{}\n")
+            with self.assertRaisesRegex(RuntimeFailure, "replayed artifact drifted"):
+                workflow_runtime._create_once_or_verify_bytes(root, relative, payload)
+
+    def test_host_capability_full_command_reenters_after_pre_receipt_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repository = Path(raw).resolve() / "repo"
+            (repository / ".git").mkdir(parents=True)
+            (repository / "src").mkdir()
+            root = repository / ".workflow" / "run"
+            binary = Path(raw) / "release/bin/codex"
+            runtime_zsh = Path(raw) / "release/codex-resources/zsh/bin/zsh"
+            binary.parent.mkdir(parents=True)
+            runtime_zsh.parent.mkdir(parents=True)
+            binary.write_text("fixture\n")
+            runtime_zsh.write_text("fixture\n")
+            identity = (binary, digest(binary.read_bytes()), "codex fixture")
+            executions: dict[str, RawExecution] = {}
+            executor_calls: list[str] = []
+
+            def prepare(_root: Path, _auth: Path, owner_id: str) -> Path:
+                home = root / "runtime/codex-homes" / owner_id
+                (home / "tmp/arg0/codex-arg0fixture").mkdir(parents=True, exist_ok=True)
+                return home
+
+            def fake_executor(config: CodexExecConfig):
+                def execute(task: dict[str, object], _packet: dict[str, object]) -> RawExecution:
+                    role = str(task["role"])
+                    executor_calls.append(role)
+                    session_id = f"{role}-session"
+                    context = {
+                        "model": "gpt-5.6-terra" if role == "worker" else "gpt-5.6-sol",
+                        "effort": "xhigh",
+                        "session_id": session_id,
+                        "workspace_roots": [os.fspath(repository / "src")],
+                        "sandbox_policy": {"type": "read-only"},
+                        "permission_profile": {
+                            "type": "managed",
+                            "network": "restricted",
+                            "file_system": {
+                                "type": "restricted",
+                                "entries": [
+                                    {"path": {"type": "special", "value": {"kind": "minimal"}}, "access": "read"},
+                                    {"path": {"type": "path", "path": os.fspath(repository / "src")}, "access": "read"},
+                                    {"path": {"type": "path", "path": os.fspath(runtime_zsh)}, "access": "read"},
+                                    {"path": {"type": "path", "path": os.fspath(config.codex_home / "tmp/arg0/codex-arg0fixture")}, "access": "read"},
+                                ],
+                            },
+                        },
+                    }
+                    events = [
+                        {"type": "thread.started", "thread_id": session_id},
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": '{"answer":"probe-ok"}'}},
+                        {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}},
+                    ]
+                    payload = b"".join(workflow_runtime._canonical(item) for item in events)
+                    rollout = config.codex_home / "sessions/2026/07/13" / f"{session_id}.jsonl"
+                    rollout.parent.mkdir(parents=True, exist_ok=True)
+                    rollout.write_bytes(
+                        workflow_runtime._canonical({"type": "session_meta", "payload": {"id": session_id}})
+                        + workflow_runtime._canonical({"type": "turn_context", "payload": context})
+                    )
+                    base = root / "runtime/watchdogs/000-host-capability-probe" / str(task["task_id"])
+                    base.mkdir(parents=True, exist_ok=True)
+                    (base / "request.json").write_text("{}\n")
+                    (base / "terminal.json").write_text("{}\n")
+                    result = RawExecution(0, events, "", context, stdout_bytes=payload)
+                    executions[role] = result
+                    return result
+
+                return execute
+
+            original_publish = workflow_runtime._create_once_or_verify_bytes
+            fail_once = {"armed": True}
+
+            def crash_before_receipt(run_root: Path, relative: str, payload: bytes) -> Path:
+                if relative.endswith("focused-tests.txt") and fail_once["armed"]:
+                    fail_once["armed"] = False
+                    raise RuntimeFailure("injected pre-receipt crash")
+                return original_publish(run_root, relative, payload)
+
+            denials = {
+                "workspace_read_exit": 0,
+                "workspace_write_exit": 1,
+                "sibling_read_exit": 1,
+                "control_read_exit": 1,
+                "credential_read_exit": 1,
+                "network_exit": 1,
+            }
+            patches = (
+                mock.patch("workflow_runtime._codex_identity", return_value=identity),
+                mock.patch("workflow_runtime._prepare_codex_home", side_effect=prepare),
+                mock.patch("workflow_runtime.codex_task_executor", side_effect=fake_executor),
+                mock.patch("workflow_runtime.reconcile_supervisors", return_value={"active": []}),
+                mock.patch("workflow_runtime._run_host_read_only_denials", return_value=denials),
+                mock.patch("workflow_runtime._run_host_contract_tests", return_value=b"focused ... ok\n\nOK\n"),
+                mock.patch("workflow_runtime._validate_host_capability_provenance"),
+                mock.patch("workflow_runtime._cleanup_codex_auth"),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7]:
+                with mock.patch(
+                    "workflow_runtime._create_once_or_verify_bytes",
+                    side_effect=crash_before_receipt,
+                ):
+                    with self.assertRaisesRegex(RuntimeFailure, "injected pre-receipt crash"):
+                        _probe_host_capabilities_command(
+                            root, repository, "src", root / "auth.json", os.fspath(binary)
+                        )
+                self.assertFalse((root / "evidence/host-capability-receipt.json").exists())
+                with mock.patch(
+                    "workflow_runtime._raw_from_supervisor_terminal",
+                    side_effect=lambda _root, request_ref, _terminal_ref: executions[
+                        "worker" if "worker" in request_ref else "top"
+                    ],
+                ):
+                    result = _probe_host_capabilities_command(
+                        root, repository, "src", root / "auth.json", os.fspath(binary)
+                    )
+            self.assertEqual(result["status"], "pass")
+            self.assertFalse(result["replayed"])
+            self.assertEqual(sorted(executor_calls), ["top", "worker"])
+
     def test_source_write_probe_uses_phase_namespaced_supervisor_refs(self) -> None:
         self.assertEqual(
             _probe_runtime_refs("000-source-write-probe", "source-write-probe"),
@@ -435,6 +914,7 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output
                 "process_supervisor.py",
                 "recovery_runtime.py",
                 "source_workspace.py",
+                "test_vnext_runtime.py",
                 "vnext_accounting.py",
                 "workflow_runtime.py",
             },

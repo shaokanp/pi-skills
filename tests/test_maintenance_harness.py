@@ -115,6 +115,62 @@ class MaintenanceHarnessTests(unittest.TestCase):
         self.assertEqual(verified.returncode, 0, verified.stderr)
         self.assertIn("doctor passed (strict local)", verified.stdout)
 
+    def test_pre_commit_clears_inherited_repository_environment(self) -> None:
+        validation = self.root / "scripts" / "validate-all.sh"
+        assertion = (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "for variable in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX; do\n"
+            "  if [[ -n \"${!variable+x}\" ]]; then\n"
+            "    echo \"leaked repository variable: $variable\" >&2\n"
+            "    exit 1\n"
+            "  fi\n"
+            "done\n"
+        )
+        validation.write_text(assertion, encoding="utf-8")
+        validation.chmod(0o755)
+
+        private_marker = "alternate-index-" + "private-marker"
+        local_config = self.root / ".pi-skills.local.json"
+        local_config.write_text(
+            json.dumps({"private_markers": [private_marker]}) + "\n",
+            encoding="utf-8",
+        )
+        secret = self.root / "alternate-index-secret.txt"
+        secret.write_text(private_marker + "\n", encoding="utf-8")
+        alternate_index = Path(self.temp_dir.name) / "alternate-index"
+        shutil.copy2(self.root / ".git" / "index", alternate_index)
+        alternate_environment = os.environ.copy()
+        alternate_environment["GIT_INDEX_FILE"] = str(alternate_index)
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", secret.name],
+            check=True,
+            env=alternate_environment,
+        )
+
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "GIT_DIR": str(self.root / ".git"),
+                "GIT_WORK_TREE": str(self.root),
+                "GIT_INDEX_FILE": str(alternate_index),
+                "GIT_PREFIX": "fixture-prefix/",
+                "PI_SKILLS_LOCAL_CONFIG": str(local_config),
+            }
+        )
+        result = subprocess.run(
+            [str(self.root / ".githooks" / "pre-commit")],
+            cwd=self.root,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(secret.name, result.stderr)
+        self.assertIn("public safety check failed (index)", result.stderr)
+
     def test_new_skill_scaffold_fails_until_completed_without_collision_changes(self) -> None:
         registry_before = (self.root / "registry.json").read_text(encoding="utf-8")
         changelog_before = (self.root / "CHANGELOG.md").read_text(encoding="utf-8")

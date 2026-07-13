@@ -1202,6 +1202,7 @@ def attest_writer_permissions(
     workspace_root: Path,
     codex_home: Path,
     write_roots: tuple[str, ...],
+    codex_binary: Path | None = None,
 ) -> str | None:
     """Require the persisted effective profile to equal the task-specific allowlist."""
 
@@ -1221,6 +1222,16 @@ def attest_writer_permissions(
     expected = {("special:minimal", "read"), (os.fspath(workspace_root), "read")}
     expected.update((os.fspath((workspace_root / root).resolve()), "write") for root in write_roots)
     arg0 = codex_home.resolve() / "tmp" / "arg0"
+    runtime_reads: set[Path] = set()
+    if codex_binary is not None:
+        candidate = (
+            codex_binary.resolve(strict=True).parent.parent
+            / "codex-resources/zsh/bin/zsh"
+        )
+        if candidate.exists() or candidate.is_symlink():
+            if candidate.is_symlink() or not candidate.is_file():
+                return "sealed Codex runtime read path is unsafe"
+            runtime_reads.add(candidate.resolve(strict=True))
     observed: set[tuple[str, str]] = set()
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("path"), dict):
@@ -1234,6 +1245,8 @@ def attest_writer_permissions(
             return "writer filesystem path is not concrete"
         resolved = Path(value).resolve()
         if resolved.is_relative_to(arg0) and resolved.name.startswith("codex-arg0") and access == "read":
+            continue
+        if resolved in runtime_reads and access == "read":
             continue
         observed.add((os.fspath(resolved), access))
     if observed != expected:
