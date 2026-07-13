@@ -3,7 +3,17 @@
 ## Unreleased
 
 <!-- pi-skills:unreleased id=explain version=1.0.1 -->
+<!-- pi-skills:unreleased id=agent-workflow version=1.0.1 -->
 <!-- pi-skills:unreleased id=write-good-goal version=1.0.1 -->
+
+- Fixed Agent Workflow fresh-run admission by shipping a source-owned host
+  capability materializer with live Sol/Terra route, read-only containment,
+  terminal, token, and deterministic lifecycle evidence. Source-writing runs
+  can now compose that pack with the existing isolated writer probe instead of
+  depending on promotion-only callback artifacts.
+- Bound capability probes to exact argv, supervisor logs, canonical rollout
+  context, one crash-recovery slot, and the sealed Codex runtime executable
+  read required by current macOS permission profiles.
 
 - Added a portable/strict-local session doctor, fail-closed new-skill scaffold,
   bilingual guide checks, and deterministic registry/changelog version markers.

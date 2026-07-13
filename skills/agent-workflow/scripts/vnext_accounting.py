@@ -437,6 +437,7 @@ def _call_class(payload: dict[str, Any]) -> str:
             command_name = None
         if command_name in {
             "admit", "run-phase", "run-once", "cancel", "reconcile", "probe-source-write",
+            "probe-host-capabilities",
             "amend", "resume-brief", "seal-final", "seal-accounting",
         }:
             return {
@@ -446,6 +447,7 @@ def _call_class(payload: dict[str, Any]) -> str:
                 "reconcile": "phase_terminal",
                 "cancel": "blocked",
                 "probe-source-write": "planning",
+                "probe-host-capabilities": "planning",
                 "amend": "human_gate",
                 "resume-brief": "planning",
                 "seal-final": "final",

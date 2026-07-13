@@ -455,8 +455,14 @@ class SourceWorkspaceTests(unittest.TestCase):
             base = Path(raw).resolve()
             workspace = base / "workspace"
             home = base / "codex-home"
+            codex_binary = base / "release/bin/codex"
+            runtime_zsh = base / "release/codex-resources/zsh/bin/zsh"
             (workspace / "src/api").mkdir(parents=True)
             (home / "tmp/arg0/codex-arg0fixture").mkdir(parents=True)
+            codex_binary.parent.mkdir(parents=True)
+            runtime_zsh.parent.mkdir(parents=True)
+            codex_binary.write_text("fixture\n")
+            runtime_zsh.write_text("fixture\n")
             profile = writer_profile_bytes(("src/api",)).decode()
             self.assertIn('":minimal" = "read"', profile)
             self.assertIn('"src/api" = "write"', profile)
@@ -473,18 +479,25 @@ class SourceWorkspaceTests(unittest.TestCase):
                             {"path": {"type": "special", "value": {"kind": "minimal"}}, "access": "read"},
                             {"path": {"type": "path", "path": str(workspace)}, "access": "read"},
                             {"path": {"type": "path", "path": str(workspace / "src/api")}, "access": "write"},
+                            {"path": {"type": "path", "path": str(runtime_zsh)}, "access": "read"},
                             {"path": {"type": "path", "path": str(home / "tmp/arg0/codex-arg0fixture")}, "access": "read"},
                         ],
                     },
                 },
             }
-            self.assertIsNone(attest_writer_permissions(context, workspace, home, ("src/api",)))
+            self.assertIsNone(
+                attest_writer_permissions(
+                    context, workspace, home, ("src/api",), codex_binary
+                )
+            )
             context["permission_profile"]["file_system"]["entries"].append(
                 {"path": {"type": "path", "path": str(base / "escape")}, "access": "write"}
             )
             self.assertIn(
                 "not exact",
-                attest_writer_permissions(context, workspace, home, ("src/api",)),
+                attest_writer_permissions(
+                    context, workspace, home, ("src/api",), codex_binary
+                ),
             )
 
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("codex"), "requires Codex macOS sandbox")

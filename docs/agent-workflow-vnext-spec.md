@@ -191,6 +191,20 @@ Missing core capability produces typed `admission_blocked`。Read-only phases可
 canary；任何 source-writing phase必須重新做 phase-local writer admission。Optional UI、native accounting
 enrichment或 callback transport只可標 unavailable，不影響 protocol truth。
 
+Fresh ordinary runs不得依賴 promotion workspace、canary archive或開發期 callback receipt才能 admission。
+Portable runtime必須提供 source-owned `probe-host-capabilities` materializer：在新 workflow root 中，以一個
+terminal barrier平行執行 pinned Terra／Sol read-only probes，逐一 seal raw session、actual route、effective
+permission profile、terminal token usage、read-only denial與 focused lifecycle tests，再輸出可直接綁入
+`workflow.json`的 capability refs。`source_write`另組合 live `probe-source-write` 的
+`sandbox_isolation` binding。兩者皆綁 running bundle、Codex binary/version、relevant root與24小時 freshness。
+
+Main→Clean Orchestrator lineage與最後只回 Main 一次，仍是 host-owned outer boundary；portable process無法
+不可偽造地判定「目前是哪一個 native child」，因此不得用可覆寫的環境變數、另一個 Main/child callback或
+promotion archive在 admission自我認證。Capability names中的 `blocking_wait`與`raw_session_audit`只表示
+Phase runner的 OS all-terminal barrier及 routed worker canonical raw-session replay；outer lineage、`fork_turns=none`
+與 final callback另由 host在 completion後審核。缺少 outer audit時 workflow可執行 portable isolated phases，
+但最終不得宣稱 target Agent Workflow成功或通過 benchmark/promotion。
+
 Capability profiles：
 
 | Profile | Required facts | Claim allowed |
@@ -210,6 +224,14 @@ Generic `workspace-write`不符合 writer admission；它可能包含 host temp 
 `[permissions]` profile，以 `:minimal`加明確 source read roots為底，只對 isolated task roots授予 write；
 不得繼承會授予 `:root = read`的 built-in `:read-only`。必須以實際 credential、`.git`、external path與
 network denial probe證明 effective policy。Model輸出的 capability JSON不是 evidence。
+Host capability receipt必須綁每個 routed role的 supervisor request/terminal、exact command與 sanitized
+environment、canonical rollout bytes、persisted turn context與 terminal token usage；caller填入的
+`partial_wakes=0`或 copied context本身不是證據。
+Exact command必須逐 argv element等於 source-owned probe template，並將 supervisor stdout逐 byte綁到
+copied events、由 canonical rollout重新投影 turn context；額外、重複或錯位 flags一律拒絕。Codex host若在
+effective profile加入 runtime executable read，只允許由 sealed Codex binary路徑唯一推導且存在的
+`codex-resources/zsh/bin/zsh`，不得泛化成 shell／runtime目錄讀取。Request-only crash可消耗唯一 recovery slot；
+receipt前已發布的 derived artifacts只允許 exact-byte replay，任何 drift fail closed。
 
 ## 8. Workflow Brief and context contract
 

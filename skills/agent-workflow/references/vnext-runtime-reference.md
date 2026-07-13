@@ -27,6 +27,8 @@ Copy a template outside the workflow root, replace example-specific scenario val
 Invoke `workflow_runtime.py` from `skills/agent-workflow/scripts/`:
 
 ```bash
+python3 workflow_runtime.py probe-host-capabilities --root <workflow> --repo <repo> --relevant-root <relative-root> --auth-source <auth.json>
+python3 workflow_runtime.py probe-source-write --root <workflow> --auth-source <auth.json>
 python3 workflow_runtime.py admit --root <workflow> --repo <repo> --workflow-source <workflow.json>
 python3 workflow_runtime.py pinned-runtime --root <workflow>
 python3 workflow_runtime.py run-phase --root <workflow> --repo <repo> --plan-source <phase.json> --auth-source <auth.json> --max-parallel <n>
@@ -38,7 +40,34 @@ python3 workflow_runtime.py seal-final --root <workflow> --candidate-source <fin
 python3 workflow_runtime.py seal-accounting --root <workflow> --native-source <native-observation.json> --native-evidence-source <native-events.jsonl> --completion-source <orchestrator-session.jsonl>
 ```
 
-`admit` first copies the exact eight-file executable bundle into `runtime-bundle/` with create-once replay, then
+Fresh admission is intentionally self-bootstrapping. Before materializing a
+`read_only_canary` or `source_write` workflow source, run
+`probe-host-capabilities` once for that workflow root. It launches one pinned
+Terra and one pinned Sol read-only probe behind a single terminal barrier, then
+returns ready-to-copy workflow capability bindings backed by raw session,
+route, permission, token, denial, and focused-test evidence. A `source_write`
+workflow additionally runs `probe-source-write` and replaces only the returned
+`sandbox_isolation` binding with that live writer-probe binding. The two
+commands write only under the new workflow root; the repository root is
+read-only during the host probe, and the writer probe uses its own synthetic
+workspace. Evidence is bundle/Codex/root-bound, expires after 24 hours, and
+fails closed on tampering or route drift.
+The host probe binds only portable Phase-runner capabilities: the OS terminal
+barrier plus each routed worker's supervisor request/terminal, exact command and
+sanitized environment, canonical rollout, route, permissions, and token usage.
+Exact means the complete argv equals the source-owned probe template; terminal
+stdout must equal the copied events, and the copied turn context must reproject
+from the canonical rollout. The only optional host runtime read is the exact
+`codex-resources/zsh/bin/zsh` file derived from the sealed Codex binary; arbitrary
+shell or runtime-directory reads remain denied. A request-only crash consumes the
+single recovery slot, while pre-receipt derived artifacts may replay only when
+their bytes are identical.
+It does not self-certify which native child invoked it. Main→clean-Orchestrator
+lineage, `fork_turns=none`, and final callback delivery remain a host-owned
+post-terminal audit. A run missing that audit may execute isolated phases but
+must not claim target Agent Workflow or benchmark/promotion success.
+
+`admit` first copies the exact manifest-bound executable and focused-validator bundle into `runtime-bundle/` with create-once replay, then
 commits `workflow.json`. Before every later lifecycle command, the host runs `pinned-runtime` and invokes the returned
 absolute `runtime_path`; this preserves active-run behavior across a default-selector rollback or app restart. Missing,
 extra, symlinked, or digest-drifted pinned members return `blocked_incompatible_release`. There is no current-runtime or

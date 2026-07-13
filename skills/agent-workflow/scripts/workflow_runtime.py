@@ -46,6 +46,7 @@ from baseline_gate import (
     verify_candidate_against_parent,
 )
 from phase_protocol import (
+    CAPABILITY_NAMES,
     ProtocolError,
     TASK_TERMINAL_STATUSES,
     _read_artifact_bytes,
@@ -174,6 +175,24 @@ def _digest_file(path: Path) -> str:
     return "sha256:" + hasher.hexdigest()
 
 
+def _create_once_or_verify_bytes(root: Path, relative_path: str, payload: bytes) -> Path:
+    """Publish derived evidence once, or replay only byte-identical crash residue."""
+
+    path = root / relative_path
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != payload:
+            raise RuntimeFailure(f"replayed artifact drifted: {relative_path}")
+        return path
+    try:
+        return create_once_bytes(root, relative_path, payload)
+    except ArtifactError as exc:
+        raise RuntimeFailure(f"artifact publication failed: {exc}") from exc
+
+
+def _create_once_or_verify_json(root: Path, relative_path: str, value: Any) -> Path:
+    return _create_once_or_verify_bytes(root, relative_path, _canonical(value))
+
+
 _RUNTIME_BUNDLE_FILES = (
     "app_resume_adapter.py",
     "artifact_store.py",
@@ -182,6 +201,7 @@ _RUNTIME_BUNDLE_FILES = (
     "process_supervisor.py",
     "recovery_runtime.py",
     "source_workspace.py",
+    "test_vnext_runtime.py",
     "vnext_accounting.py",
     "workflow_runtime.py",
 )
@@ -764,10 +784,11 @@ def _validate_admission_inputs(
         except (ProtocolError, BaselineError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RuntimeFailure("candidate baseline parent is invalid") from exc
 
+    codex_path: Path | None = None
     codex_sha256: str | None = None
     codex_version: str | None = None
     if codex_binary is not None:
-        _, codex_sha256, codex_version = _codex_identity(codex_binary)
+        codex_path, codex_sha256, codex_version = _codex_identity(codex_binary)
 
     evidence_cache: dict[tuple[str, str], dict[str, Any]] = {}
     validated_receipts: set[tuple[str, str]] = set()
@@ -779,6 +800,7 @@ def _validate_admission_inputs(
                 running_bundle=running_bundle,
                 codex_sha256=codex_sha256,
                 codex_version=codex_version,
+                codex_binary=codex_path,
             )
             continue
         cache_key = (capability["evidence_ref"], capability["evidence_sha256"])
@@ -794,9 +816,10 @@ def _validate_admission_inputs(
                 "codex_cli_version",
                 "codex_binary_sha256",
                 "capabilities",
-            } or evidence.get("schema_version") != (
-                "agent-workflow.slice0b-capability-summary.v2"
-            ):
+            } or evidence.get("schema_version") not in {
+                "agent-workflow.slice0b-capability-summary.v2",
+                "agent-workflow.host-capability-summary.v1",
+            }:
                 raise RuntimeFailure(f"capability evidence uses an unsupported schema for {name}")
             if codex_sha256 is not None and evidence["codex_binary_sha256"] != codex_sha256:
                 raise RuntimeFailure("capability evidence Codex binary digest drifted")
@@ -826,14 +849,30 @@ def _validate_admission_inputs(
             receipt = json.loads(receipt_payload)
         except (ProtocolError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RuntimeFailure(f"capability source receipt is invalid for {name}") from exc
-        if (
-            not isinstance(receipt, dict)
-            or receipt.get("schema_version") != "agent-workflow.capability-receipt.vnext.v3"
-        ):
+        if not isinstance(receipt, dict) or receipt.get("schema_version") not in {
+            "agent-workflow.capability-receipt.vnext.v3",
+            "agent-workflow.host-capability-receipt.v1",
+        }:
             raise RuntimeFailure(f"capability source receipt uses an unsupported contract for {name}")
         statuses = receipt.get("capabilities")
         if not isinstance(statuses, dict) or statuses.get(name) != declared:
             raise RuntimeFailure(f"capability source receipt contradicts {name}")
+        receipt_key = (observed["evidence_ref"], observed["evidence_sha256"])
+        if receipt.get("schema_version") == "agent-workflow.host-capability-receipt.v1":
+            if receipt_key not in validated_receipts:
+                _validate_host_capability_provenance(
+                    root,
+                    receipt,
+                    running_bundle=running_bundle,
+                    codex_sha256=codex_sha256,
+                    codex_version=codex_version,
+                    worker_root=(
+                        (repository_root or Path(root).resolve())
+                        / workflow["admission"]["relevant_roots"][0]
+                    ).resolve(strict=True),
+                )
+                validated_receipts.add(receipt_key)
+            continue
         adapter = receipt.get("blocking_transport")
         expected_adapter = {
             "host": "codex-desktop",
@@ -889,7 +928,6 @@ def _validate_admission_inputs(
         }
         if proofs != expected_proofs:
             raise RuntimeFailure("capability-specific probe contract is incomplete")
-        receipt_key = (observed["evidence_ref"], observed["evidence_sha256"])
         if receipt_key not in validated_receipts:
             _validate_capability_provenance(
                 root,
@@ -912,6 +950,7 @@ def _validate_source_write_capability(
     running_bundle: str,
     codex_sha256: str | None,
     codex_version: str | None,
+    codex_binary: Path | None = None,
 ) -> None:
     """Validate one actual named-profile writer probe, not a model assertion."""
 
@@ -1004,6 +1043,7 @@ def _validate_source_write_capability(
             workspace_root,
             source_codex_home,
             write_roots,
+            codex_binary,
         )
         is not None
     ):
@@ -1129,6 +1169,334 @@ def _validate_source_write_capability(
         "network_enabled": False,
     }:
         raise RuntimeFailure("source-write sanitized environment evidence is incomplete")
+
+
+def _host_probe_command(
+    *,
+    codex_binary: str,
+    model: str,
+    audit_marker: str,
+    output_schema: Path,
+    worker_root: Path,
+) -> list[str]:
+    """Return the one source-owned argv accepted for host capability probes."""
+
+    return [
+        codex_binary,
+        "exec",
+        "--ignore-rules",
+        "--disable",
+        "plugins",
+        "--json",
+        "-m",
+        model,
+        "-c",
+        'model_reasoning_effort="xhigh"',
+        "-c",
+        'shell_environment_policy.inherit="core"',
+        "-c",
+        'cli_auth_credentials_store="file"',
+        "-c",
+        f"developer_instructions={json.dumps(_ISOLATED_WORKER_DEVELOPER_INSTRUCTIONS)}",
+        "-c",
+        f'agent_workflow_audit_marker="{audit_marker}"',
+        "--output-schema",
+        os.fspath(output_schema),
+        "-p",
+        "vnext-read-only",
+        "-C",
+        os.fspath(worker_root),
+        "Return exactly the schema-compliant JSON answer probe-ok. Use no tools.",
+    ]
+
+
+def _validate_host_capability_provenance(
+    root: Path,
+    receipt: dict[str, Any],
+    *,
+    running_bundle: str,
+    codex_sha256: str | None,
+    codex_version: str | None,
+    worker_root: Path,
+) -> None:
+    """Validate a fresh, source-owned host probe without promotion-only callbacks."""
+
+    expected_keys = {
+        "schema_version",
+        "observed_at",
+        "producer",
+        "relevant_root",
+        "execution",
+        "sessions",
+        "deterministic_denials",
+        "focused_tests",
+        "capabilities",
+    }
+    if set(receipt) != expected_keys:
+        raise RuntimeFailure("host capability receipt contract is incomplete")
+    producer = receipt["producer"]
+    if not isinstance(producer, dict) or set(producer) != {
+        "name",
+        "runtime_bundle_sha256",
+        "codex_cli_version",
+        "codex_binary_sha256",
+    }:
+        raise RuntimeFailure("host capability producer is invalid")
+    if (
+        producer["name"] != "agent-workflow-host-capability-probe"
+        or producer["runtime_bundle_sha256"] != running_bundle
+        or (codex_sha256 is not None and producer["codex_binary_sha256"] != codex_sha256)
+        or (codex_version is not None and producer["codex_cli_version"] != codex_version)
+    ):
+        raise RuntimeFailure("host capability producer identity drifted")
+    try:
+        observed_at = datetime.fromisoformat(receipt["observed_at"].replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise RuntimeFailure("host capability observation time is invalid") from exc
+    age = _now() - observed_at.astimezone(timezone.utc)
+    if age.total_seconds() < -300 or age > timedelta(hours=24):
+        raise RuntimeFailure("host capability evidence is stale or from the future")
+    if Path(receipt["relevant_root"]).resolve(strict=True) != worker_root.resolve(strict=True):
+        raise RuntimeFailure("host capability relevant root drifted")
+
+    execution = receipt["execution"]
+    if not isinstance(execution, dict) or set(execution) != {
+        "started_at",
+        "finished_at",
+        "role_count",
+        "terminal_count",
+    }:
+        raise RuntimeFailure("host capability execution evidence is invalid")
+    try:
+        started_at = datetime.fromisoformat(execution["started_at"].replace("Z", "+00:00"))
+        finished_at = datetime.fromisoformat(execution["finished_at"].replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise RuntimeFailure("host capability execution time is invalid") from exc
+    if (
+        finished_at < started_at
+        or observed_at < finished_at
+        or execution["role_count"] != 2
+        or execution["terminal_count"] != 2
+    ):
+        raise RuntimeFailure("host capability blocking barrier evidence is insufficient")
+
+    sessions = receipt["sessions"]
+    if not isinstance(sessions, dict) or set(sessions) != {"top", "worker"}:
+        raise RuntimeFailure("host capability routed session set drifted")
+    expected_models = {"top": "gpt-5.6-sol", "worker": "gpt-5.6-terra"}
+    observed_ids: set[str] = set()
+    for role, expected_model in expected_models.items():
+        session = sessions[role]
+        if not isinstance(session, dict) or set(session) != {
+            "session_id",
+            "model",
+            "reasoning_effort",
+            "codex_home",
+            "events_ref",
+            "events_sha256",
+            "turn_context_ref",
+            "turn_context_sha256",
+            "output_ref",
+            "output_sha256",
+            "supervisor_request_ref",
+            "supervisor_request_sha256",
+            "supervisor_terminal_ref",
+            "supervisor_terminal_sha256",
+            "rollout_path",
+            "rollout_bytes",
+            "rollout_sha256",
+        }:
+            raise RuntimeFailure("host capability routed session contract is invalid")
+        if (
+            session["model"] != expected_model
+            or session["reasoning_effort"] != "xhigh"
+            or not isinstance(session["session_id"], str)
+            or not session["session_id"]
+            or session["session_id"] in observed_ids
+        ):
+            raise RuntimeFailure("host capability route attestation drifted")
+        observed_ids.add(session["session_id"])
+        codex_home = Path(session["codex_home"]).resolve(strict=True)
+        if not codex_home.is_relative_to(Path(root).resolve()):
+            raise RuntimeFailure("host capability Codex home escaped its workflow root")
+        try:
+            request, request_payload = load_supervisor_request(
+                root, session["supervisor_request_ref"], enforce_boot=False
+            )
+            terminal_payload = _read_artifact_bytes(
+                root,
+                session["supervisor_terminal_ref"],
+                session["supervisor_terminal_sha256"],
+            )
+            terminal = validate_supervisor_receipt(json.loads(terminal_payload))
+        except (ProtocolError, SupervisorFailure, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeFailure("host capability supervisor evidence is invalid") from exc
+        command = request.get("command")
+        environment = request.get("environment")
+        expected_command = _host_probe_command(
+            codex_binary=request.get("codex_binary"),
+            model=expected_model,
+            audit_marker=request.get("audit_marker"),
+            output_schema=(
+                root / "evidence/host-capability-probe/output-schema.json"
+            ).resolve(strict=True),
+            worker_root=worker_root,
+        )
+        if (
+            _digest(request_payload) != session["supervisor_request_sha256"]
+            or terminal.get("request_ref") != session["supervisor_request_ref"]
+            or terminal.get("request_sha256") != session["supervisor_request_sha256"]
+            or terminal.get("status") != "completed"
+            or terminal.get("exit_code") != 0
+            or terminal.get("group_reaped") is not True
+            or terminal.get("group_gone_observed") is not True
+        ):
+            raise RuntimeFailure("host capability supervisor terminal evidence is insufficient")
+        if command != expected_command:
+            raise RuntimeFailure("host capability supervisor command is not exact")
+        if request.get("command_sha256") != _digest(_canonical(expected_command)):
+            raise RuntimeFailure("host capability supervisor command digest drifted")
+        expected_environment_keys = {
+            "AGENT_WORKFLOW_AUDIT_MARKER",
+            "CODEX_HOME",
+            "HOME",
+            "LANG",
+            "PATH",
+            "TMPDIR",
+        }
+        if (
+            not isinstance(environment, dict)
+            or set(environment) != expected_environment_keys
+            or Path(environment["CODEX_HOME"]).resolve() != codex_home
+            or Path(environment["HOME"]).resolve() != (codex_home / "home").resolve()
+            or Path(environment["TMPDIR"]).resolve() != (codex_home / "tmp").resolve()
+            or environment["AGENT_WORKFLOW_AUDIT_MARKER"] != request.get("audit_marker")
+            or request.get("work_mode") != "read"
+            or request.get("write_roots") != []
+            or request.get("runtime_bundle_sha256") != running_bundle
+            or request.get("codex_binary_sha256") != producer["codex_binary_sha256"]
+            or terminal.get("stdout_ref") != request.get("stdout_ref")
+            or terminal.get("stderr_ref") != request.get("stderr_ref")
+        ):
+            raise RuntimeFailure("host capability supervisor environment evidence is insufficient")
+        rollout_path = Path(session["rollout_path"]).resolve(strict=True)
+        canonical_rollout = _find_session_rollout(codex_home, session["session_id"])
+        rollout_size = session["rollout_bytes"]
+        if (
+            canonical_rollout is None
+            or rollout_path != canonical_rollout
+            or not isinstance(rollout_size, int)
+            or isinstance(rollout_size, bool)
+            or rollout_size <= 0
+            or rollout_size > 4 * 1024 * 1024
+            or rollout_path.stat().st_size != rollout_size
+            or _digest_file(rollout_path) != session["rollout_sha256"]
+        ):
+            raise RuntimeFailure("host capability canonical rollout evidence drifted")
+        try:
+            events_payload = _read_artifact_bytes(
+                root, session["events_ref"], session["events_sha256"]
+            )
+            terminal_events = _read_artifact_bytes(
+                root, terminal["stdout_ref"], terminal["stdout_sha256"]
+            )
+            context = json.loads(
+                _read_artifact_bytes(
+                    root,
+                    session["turn_context_ref"],
+                    session["turn_context_sha256"],
+                )
+            )
+            output = json.loads(
+                _read_artifact_bytes(root, session["output_ref"], session["output_sha256"])
+            )
+        except (ProtocolError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeFailure("host capability routed evidence is invalid") from exc
+        canonical_context = _project_turn_context_from_rollout(
+            rollout_path, session["session_id"]
+        )
+        events = _parse_jsonl(events_payload)
+        started = [item for item in events if item.get("type") == "thread.started"]
+        completed = [item for item in events if item.get("type") == "turn.completed"]
+        failed = [item for item in events if item.get("type") in {"turn.failed", "runtime.error"}]
+        usage = completed[0].get("usage") if len(completed) == 1 else None
+        if (
+            len(started) != 1
+            or events_payload != terminal_events
+            or terminal["stdout_sha256"] != session["events_sha256"]
+            or started[0].get("thread_id") != session["session_id"]
+            or len(completed) != 1
+            or failed
+            or not isinstance(usage, dict)
+            or not all(
+                isinstance(usage.get(key), int) and usage[key] >= 0
+                for key in ("input_tokens", "output_tokens")
+            )
+            or output != {"answer": "probe-ok"}
+            or canonical_context != context
+            or context.get("session_id") != session["session_id"]
+            or context.get("model") != expected_model
+            or context.get("effort", context.get("reasoning_effort")) != "xhigh"
+            or _attest_worker_permissions(
+                context,
+                worker_root,
+                codex_home,
+                Path(request["codex_binary"]),
+            )
+            is not None
+        ):
+            raise RuntimeFailure("host capability routed evidence is insufficient")
+
+    denial = receipt["deterministic_denials"]
+    tests = receipt["focused_tests"]
+    for value, label in ((denial, "denial"), (tests, "focused test")):
+        if not isinstance(value, dict) or set(value) != {"evidence_ref", "evidence_sha256"}:
+            raise RuntimeFailure(f"host capability {label} reference is invalid")
+    try:
+        denial_report = json.loads(
+            _read_artifact_bytes(root, denial["evidence_ref"], denial["evidence_sha256"])
+        )
+        test_report = _read_artifact_bytes(
+            root, tests["evidence_ref"], tests["evidence_sha256"]
+        ).decode("utf-8", errors="strict").replace("\r\n", "\n")
+    except (ProtocolError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeFailure("host capability deterministic evidence is invalid") from exc
+    expected_denials = {
+        "workspace_read_exit",
+        "workspace_write_exit",
+        "sibling_read_exit",
+        "control_read_exit",
+        "credential_read_exit",
+        "network_exit",
+    }
+    if (
+        not isinstance(denial_report, dict)
+        or set(denial_report) != expected_denials
+        or denial_report["workspace_read_exit"] != 0
+        or any(denial_report[name] == 0 for name in expected_denials - {"workspace_read_exit"})
+    ):
+        raise RuntimeFailure("host capability read-only denials are insufficient")
+    required_tests = {
+        "test_cancel_rejects_record_without_live_unforgeable_marker",
+        "test_cancel_signals_active_group_and_terminalizes_queued_task",
+        "test_generation_claim_uses_one_predecessor_authority_contention_key",
+        "test_log_drainer_caps_event_object_count_even_within_durable_limit",
+        "test_runner_sigkill_reconcile_materializes_task_and_phase_receipt",
+        "test_terminal_fence_runs_after_workers_and_before_results_or_receipt",
+    }
+    if (
+        not required_tests.issubset(set(re.findall(r"test_[a-z0-9_]+", test_report)))
+        or "\nOK\n" not in test_report
+    ):
+        raise RuntimeFailure("host capability focused tests are insufficient")
+
+    statuses = receipt["capabilities"]
+    expected_statuses = {
+        name: "unavailable" if name == "sandbox_isolation" else "pass"
+        for name in CAPABILITY_NAMES
+    }
+    if statuses != expected_statuses:
+        raise RuntimeFailure("host capability status set drifted")
 
 
 def _validate_capability_provenance(
@@ -1443,50 +1811,90 @@ def _find_turn_context(codex_home: Path, thread_id: str) -> dict[str, Any] | Non
         key=lambda path: path.stat().st_mtime_ns,
         reverse=True,
     )
+    scanned = 0
     for path in candidates[:32]:
-        if path.stat().st_size > 32 * 1024 * 1024:
+        size = path.stat().st_size
+        if size > 32 * 1024 * 1024 or scanned + size > 128 * 1024 * 1024:
             continue
-        matched = False
-        context: dict[str, Any] | None = None
-        for line in path.read_bytes().splitlines():
-            try:
-                event = json.loads(line)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if not isinstance(event, dict):
-                continue
-            if event.get("type") == "session_meta":
-                payload = event.get("payload")
-                if isinstance(payload, dict) and thread_id in {
-                    payload.get("id"),
-                    payload.get("session_id"),
-                }:
-                    matched = True
-            elif event.get("type") == "turn_context":
-                payload = event.get("payload")
-                if isinstance(payload, dict):
-                    context = payload
-        if matched and context is not None:
-            return {
-                "model": context.get("model"),
-                "effort": context.get("effort")
-                or context.get("collaboration_mode", {}).get("settings", {}).get("reasoning_effort"),
-                "session_id": thread_id,
-                "workspace_roots": context.get("workspace_roots"),
-                "sandbox_policy": context.get("sandbox_policy"),
-                "permission_profile": context.get("permission_profile"),
-            }
+        scanned += size
+        with path.open("rb") as handle:
+            payload_bytes = handle.read(size + 1)
+        if len(payload_bytes) != size:
+            continue
+        projected = _project_turn_context_payload(payload_bytes, thread_id)
+        if projected is not None:
+            return projected
     return None
+
+
+def _project_turn_context_payload(
+    payload_bytes: bytes, thread_id: str
+) -> dict[str, Any] | None:
+    """Project one persisted turn context from a bounded rollout payload."""
+
+    matched = False
+    context: dict[str, Any] | None = None
+    for line in payload_bytes.splitlines():
+        try:
+            event = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "session_meta":
+            payload = event.get("payload")
+            if isinstance(payload, dict) and thread_id in {
+                payload.get("id"),
+                payload.get("session_id"),
+            }:
+                matched = True
+        elif event.get("type") == "turn_context":
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                context = payload
+    if not matched or context is None:
+        return None
+    return {
+        "model": context.get("model"),
+        "effort": context.get("effort")
+        or context.get("collaboration_mode", {}).get("settings", {}).get("reasoning_effort"),
+        "session_id": thread_id,
+        "workspace_roots": context.get("workspace_roots"),
+        "sandbox_policy": context.get("sandbox_policy"),
+        "permission_profile": context.get("permission_profile"),
+    }
+
+
+def _project_turn_context_from_rollout(
+    rollout_path: Path, thread_id: str
+) -> dict[str, Any] | None:
+    """Read and project one already size-capped canonical rollout."""
+
+    size = rollout_path.stat().st_size
+    if size <= 0 or size > 4 * 1024 * 1024:
+        return None
+    with rollout_path.open("rb") as handle:
+        payload = handle.read(size + 1)
+    if len(payload) != size:
+        return None
+    return _project_turn_context_payload(payload, thread_id)
 
 
 def _find_session_rollout(codex_home: Path, thread_id: str) -> Path | None:
     """Return the one bounded rollout file carrying an exact session identity."""
 
     matches: list[Path] = []
-    for path in sorted(codex_home.glob("sessions/**/*.jsonl")):
+    scanned = 0
+    for path in sorted(codex_home.glob("sessions/**/*.jsonl"))[:128]:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
             continue
-        for line in path.read_bytes().splitlines()[:8]:
+        prefix_size = min(path.stat().st_size, 64 * 1024)
+        if scanned + prefix_size > 8 * 1024 * 1024:
+            break
+        scanned += prefix_size
+        with path.open("rb") as handle:
+            prefix = handle.read(prefix_size)
+        for line in prefix.splitlines()[:8]:
             try:
                 event = json.loads(line)
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1506,6 +1914,7 @@ def _attest_worker_permissions(
     context: dict[str, Any] | None,
     worker_root: Path,
     codex_home: Path,
+    codex_binary: Path | None = None,
 ) -> str | None:
     """Return a failure reason unless the persisted turn proves least-privilege reads."""
 
@@ -1527,6 +1936,16 @@ def _attest_worker_permissions(
 
     worker_root = worker_root.resolve()
     codex_arg0_root = (codex_home.resolve() / "tmp" / "arg0")
+    runtime_reads: set[Path] = set()
+    if codex_binary is not None:
+        candidate = (
+            codex_binary.resolve(strict=True).parent.parent
+            / "codex-resources/zsh/bin/zsh"
+        )
+        if candidate.exists() or candidate.is_symlink():
+            if candidate.is_symlink() or not candidate.is_file():
+                return "sealed Codex runtime read path is unsafe"
+            runtime_reads.add(candidate.resolve(strict=True))
     if context.get("workspace_roots") != [os.fspath(worker_root)]:
         return "worker workspace roots are not exact"
     observed_kinds: list[str] = []
@@ -1557,9 +1976,16 @@ def _attest_worker_permissions(
             observed_kinds.append("worker_root")
         elif resolved.is_relative_to(codex_arg0_root) and resolved.name.startswith("codex-arg0"):
             observed_kinds.append("codex_arg0")
+        elif resolved in runtime_reads:
+            observed_kinds.append(f"codex_runtime:{resolved}")
         else:
             return "worker filesystem contains an unexpected readable path"
-    if sorted(observed_kinds) != ["codex_arg0", "minimal", "worker_root"]:
+    base_kinds = {"codex_arg0", "minimal", "worker_root"}
+    if (
+        not base_kinds.issubset(observed_kinds)
+        or len(observed_kinds) != len(set(observed_kinds))
+        or any(kind not in base_kinds and not kind.startswith("codex_runtime:") for kind in observed_kinds)
+    ):
         return "worker filesystem allowlist is incomplete or duplicated"
     return None
 
@@ -2335,9 +2761,15 @@ def codex_task_executor(config: CodexExecConfig) -> TaskExecutor:
                 execution_root,
                 execution_codex_home,
                 write_roots,
+                codex_binary_path,
             )
             if task.get("work_mode") == "write"
-            else _attest_worker_permissions(context, execution_root, execution_codex_home)
+            else _attest_worker_permissions(
+                context,
+                execution_root,
+                execution_codex_home,
+                codex_binary_path,
+            )
         )
         return RawExecution(
             exit_code=receipt.get("exit_code") if isinstance(receipt.get("exit_code"), int) else -signal.SIGTERM,
@@ -2482,9 +2914,10 @@ def _raw_from_supervisor_terminal(
             worker_root,
             codex_home,
             tuple(request["write_roots"]),
+            binary,
         )
         if request["work_mode"] == "write"
-        else _attest_worker_permissions(context, worker_root, codex_home)
+        else _attest_worker_permissions(context, worker_root, codex_home, binary)
     )
     producer_failure = (
         (receipt["producer"] == "reconciler" or status == "failed")
@@ -3540,6 +3973,470 @@ def _probe_runtime_refs(phase_id: str, task_id: str) -> dict[str, str]:
     }
 
 
+def _host_probe_output(raw: RawExecution, role: str) -> tuple[str, dict[str, Any]]:
+    if raw.adapter_error or raw.exit_code != 0 or not isinstance(raw.turn_context, dict):
+        raise RuntimeFailure(f"host capability {role} probe did not terminalize cleanly")
+    thread_ids = [
+        event.get("thread_id")
+        for event in raw.events
+        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str)
+    ]
+    completed = [event for event in raw.events if event.get("type") == "turn.completed"]
+    messages = [
+        event.get("item", {}).get("text")
+        for event in raw.events
+        if event.get("type") == "item.completed"
+        and isinstance(event.get("item"), dict)
+        and event["item"].get("type") == "agent_message"
+        and isinstance(event["item"].get("text"), str)
+    ]
+    try:
+        output = json.loads(messages[-1]) if messages else None
+    except json.JSONDecodeError:
+        output = None
+    if (
+        len(thread_ids) != 1
+        or len(completed) != 1
+        or output != {"answer": "probe-ok"}
+        or raw.turn_context.get("session_id") != thread_ids[0]
+    ):
+        raise RuntimeFailure(f"host capability {role} probe evidence is incomplete")
+    return thread_ids[0], output
+
+
+def _select_host_probe_attempt(
+    root: Path, role: str
+) -> tuple[str, RawExecution | None]:
+    """Reuse one terminal probe or select the only bounded crash-recovery slot."""
+
+    original_id = f"host-capability-{role}"
+    for candidate in (original_id, f"{original_id}-recovery"):
+        request_ref = f"runtime/watchdogs/000-host-capability-probe/{candidate}/request.json"
+        terminal_ref = f"runtime/watchdogs/000-host-capability-probe/{candidate}/terminal.json"
+        request_exists = (root / request_ref).is_file()
+        terminal_exists = (root / terminal_ref).is_file()
+        if request_exists != terminal_exists:
+            if not request_exists or candidate.endswith("-recovery"):
+                raise RuntimeFailure(
+                    f"host capability {role} partial attempt cannot be recovered"
+                )
+            continue
+        if not request_exists:
+            return candidate, None
+        observed = _raw_from_supervisor_terminal(root, request_ref, terminal_ref)
+        try:
+            _host_probe_output(observed, role)
+        except RuntimeFailure:
+            if candidate.endswith("-recovery"):
+                raise RuntimeFailure(f"host capability {role} recovery was already exhausted")
+            continue
+        return candidate, observed
+    raise RuntimeFailure(f"host capability {role} recovery was already exhausted")
+
+
+def _run_host_read_only_denials(
+    root: Path,
+    codex_path: Path,
+    codex_home: Path,
+) -> dict[str, int]:
+    probe = root / "evidence" / "host-capability-probe" / "denial-workspace"
+    sibling = root / "evidence" / "host-capability-probe" / "denial-sibling"
+    probe.mkdir(parents=True, exist_ok=True)
+    sibling.mkdir(parents=True, exist_ok=True)
+    readable = probe / "readable.txt"
+    readable.write_text("read-only-probe\n")
+    sibling_file = sibling / "readable.txt"
+    sibling_file.write_text("sibling\n")
+    control = root / "evidence" / "host-capability-probe" / "control-secret.txt"
+    control.write_text("control\n")
+    credential = codex_home / "auth.json"
+    shell = (
+        f"/bin/cat {shlex.quote(os.fspath(readable))} >/dev/null 2>&1; rr=$?; "
+        "printf denied > should-not-write.txt 2>/dev/null; ww=$?; "
+        f"/bin/cat {shlex.quote(os.fspath(sibling_file))} >/dev/null 2>&1; sr=$?; "
+        f"/bin/cat {shlex.quote(os.fspath(control))} >/dev/null 2>&1; cr=$?; "
+        f"/bin/cat {shlex.quote(os.fspath(credential))} >/dev/null 2>&1; ar=$?; "
+        "/usr/bin/curl -m 1 -fsS http://1.1.1.1 >/dev/null 2>&1; nr=$?; "
+        "printf 'workspace_read_exit=%s workspace_write_exit=%s sibling_read_exit=%s "
+        "control_read_exit=%s credential_read_exit=%s network_exit=%s\\n' "
+        '"$rr" "$ww" "$sr" "$cr" "$ar" "$nr"'
+    )
+    completed = subprocess.run(
+        [
+            os.fspath(codex_path),
+            "sandbox",
+            "-p",
+            "vnext-read-only",
+            "-P",
+            "vnext_read_only",
+            "-C",
+            os.fspath(probe),
+            "/bin/sh",
+            "-c",
+            shell,
+        ],
+        env={**os.environ, "CODEX_HOME": os.fspath(codex_home)},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode:
+        raise RuntimeFailure("host capability read-only sandbox probe failed to execute")
+    try:
+        values = dict(
+            item.split("=", 1)
+            for item in completed.stdout.decode("utf-8").strip().splitlines()[-1].split()
+        )
+        report = {key: int(value) for key, value in values.items()}
+    except (IndexError, ValueError) as exc:
+        raise RuntimeFailure("host capability read-only sandbox output is invalid") from exc
+    return report
+
+
+def _run_host_contract_tests() -> bytes:
+    test_path = Path(__file__).resolve().parent / "test_vnext_runtime.py"
+    names = [
+        "ReadOnlyTracerTests.test_cancel_rejects_record_without_live_unforgeable_marker",
+        "ReadOnlyTracerTests.test_cancel_signals_active_group_and_terminalizes_queued_task",
+        "ReadOnlyTracerTests.test_generation_claim_uses_one_predecessor_authority_contention_key",
+        "ReadOnlyTracerTests.test_log_drainer_caps_event_object_count_even_within_durable_limit",
+        "ReadOnlyTracerTests.test_runner_sigkill_reconcile_materializes_task_and_phase_receipt",
+        "ReadOnlyTracerTests.test_terminal_fence_runs_after_workers_and_before_results_or_receipt",
+    ]
+    completed = subprocess.run(
+        [sys.executable, os.fspath(test_path), *names],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    report = completed.stdout + completed.stderr
+    if completed.returncode:
+        raise RuntimeFailure("host capability focused contract tests failed")
+    if not report:
+        raise RuntimeFailure("host capability focused contract tests produced no evidence")
+    return ("\n".join(f"{name} ... ok" for name in names) + "\n\nOK\n").encode()
+
+
+def _host_capability_summary(
+    *,
+    observed_at: str,
+    codex_version: str,
+    codex_sha256: str,
+    receipt_ref: str,
+    receipt_sha256: str,
+    statuses: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "agent-workflow.host-capability-summary.v1",
+        "observed_at": observed_at,
+        "codex_cli_version": codex_version,
+        "codex_binary_sha256": codex_sha256,
+        "capabilities": {
+            name: {
+                "status": status,
+                "evidence_ref": receipt_ref,
+                "evidence_sha256": receipt_sha256,
+            }
+            for name, status in statuses.items()
+        },
+    }
+
+
+def _host_workflow_bindings(
+    summary: dict[str, Any], summary_ref: str, summary_sha256: str
+) -> dict[str, dict[str, str]]:
+    return {
+        name: {
+            "status": item["status"],
+            "evidence_ref": summary_ref,
+            "evidence_sha256": summary_sha256,
+        }
+        for name, item in summary["capabilities"].items()
+    }
+
+
+def _probe_host_capabilities_command(
+    root: Path,
+    repository: Path,
+    relevant_root: str,
+    auth_source: Path,
+    codex_binary: str,
+) -> dict[str, Any]:
+    """Materialize the seven non-writer capabilities needed by fresh admission."""
+
+    root = Path(root).resolve()
+    repository = Path(repository).resolve(strict=True)
+    if _repository_root_for(root) != repository:
+        raise RuntimeFailure("host capability workflow root belongs to another repository")
+    relative = Path(relevant_root)
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise RuntimeFailure("host capability relevant root must be a safe relative path")
+    worker_root = (repository / relative).resolve(strict=True)
+    if not worker_root.is_relative_to(repository):
+        raise RuntimeFailure("host capability relevant root escapes repository")
+    summary_ref = "evidence/host-capability-summary.json"
+    receipt_ref = "evidence/host-capability-receipt.json"
+    codex_path, codex_sha256, codex_version = _codex_identity(codex_binary)
+    _scrub_stale_codex_auth(root)
+    receipt_path = root / receipt_ref
+    summary_path = root / summary_ref
+    if receipt_path.is_file() and not receipt_path.is_symlink():
+        receipt = json.loads((root / receipt_ref).read_bytes())
+        _validate_host_capability_provenance(
+            root,
+            receipt,
+            running_bundle=_runtime_bundle_sha256(),
+            codex_sha256=codex_sha256,
+            codex_version=codex_version,
+            worker_root=worker_root,
+        )
+        receipt_sha256 = _digest(receipt_path.read_bytes())
+        expected_summary = _host_capability_summary(
+            observed_at=receipt["observed_at"],
+            codex_version=codex_version,
+            codex_sha256=codex_sha256,
+            receipt_ref=receipt_ref,
+            receipt_sha256=receipt_sha256,
+            statuses=receipt["capabilities"],
+        )
+        if summary_path.exists() or summary_path.is_symlink():
+            if summary_path.is_symlink() or not summary_path.is_file():
+                raise RuntimeFailure("host capability summary is unsafe")
+            summary = json.loads(summary_path.read_bytes())
+            if summary != expected_summary:
+                raise RuntimeFailure("host capability summary drifted from its receipt")
+        else:
+            summary_path = create_once_json(root, summary_ref, expected_summary)
+            summary = expected_summary
+        summary_sha256 = _digest(summary_path.read_bytes())
+        return {
+            "status": "pass",
+            "evidence_ref": summary_ref,
+            "evidence_sha256": summary_sha256,
+            "capability_bindings": _host_workflow_bindings(
+                summary, summary_ref, summary_sha256
+            ),
+            "replayed": True,
+        }
+
+    probe_root = root / "evidence" / "host-capability-probe"
+    schema_ref = "evidence/host-capability-probe/output-schema.json"
+    _create_once_or_verify_json(
+        root,
+        schema_ref,
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["answer"],
+            "properties": {"answer": {"type": "string", "const": "probe-ok"}},
+        },
+    )
+    started_at = _now()
+    homes: dict[str, Path] = {}
+    executions: dict[str, RawExecution] = {}
+    task_ids: dict[str, str] = {}
+    try:
+        for role in ("worker", "top"):
+            homes[role] = _prepare_codex_home(
+                root,
+                auth_source,
+                owner_id=f"host-capability-{role}",
+            )
+
+        incomplete_requests = [
+            root / "runtime" / "watchdogs" / "000-host-capability-probe"
+            / f"host-capability-{role}" / "request.json"
+            for role in ("worker", "top")
+            if (
+                root / "runtime" / "watchdogs" / "000-host-capability-probe"
+                / f"host-capability-{role}" / "request.json"
+            ).is_file()
+            and not (
+                root / "runtime" / "watchdogs" / "000-host-capability-probe"
+                / f"host-capability-{role}" / "terminal.json"
+            ).is_file()
+        ]
+        if incomplete_requests:
+            reconciled = reconcile_supervisors(root, grace_seconds=0.0)
+            if reconciled.get("active"):
+                raise RuntimeFailure("host capability probe still has an active prior attempt")
+
+        def execute_role(role: str) -> tuple[str, str, RawExecution]:
+            task_id, observed = _select_host_probe_attempt(root, role)
+            if observed is not None:
+                return role, task_id, observed
+            claim_ref = f"evidence/host-capability-probe/claims/{task_id}.json"
+            claim_path = _create_once_or_verify_json(
+                root,
+                claim_ref,
+                {
+                    "schema_version": "agent-workflow.probe-generation-claim.v1",
+                    "generation_id": "host-capability-probe",
+                    "role": role,
+                },
+            )
+            task = {
+                "task_id": task_id,
+                "role": role,
+                "work_mode": "read",
+                "write_roots": [],
+                "execution_deadline_seconds": 180,
+                "_runtime_worker_root": os.fspath(worker_root),
+                "_runtime_codex_home": os.fspath(homes[role]),
+                "_runtime_permissions_profile": "vnext-read-only",
+                "_runtime_write_roots": [],
+                "_runtime_plan_sha256": "sha256:" + "1" * 64,
+                "_runtime_generation_claim_ref": claim_ref,
+                "_runtime_generation_claim_sha256": _digest(claim_path.read_bytes()),
+                "_runtime_bundle_sha256": _runtime_bundle_sha256(),
+                "_runtime_boot_identity": _process_identity(1),
+                "_runtime_generation_id": "host-capability-probe",
+                "_runtime_phase_id": "000-host-capability-probe",
+            }
+            executor = codex_task_executor(
+                CodexExecConfig(
+                    run_root=root,
+                    repo_root=worker_root,
+                    codex_home=homes[role],
+                    codex_binary=os.fspath(codex_path),
+                    workflow_id="host-capability-probe",
+                    authority_revision=1,
+                    permissions_profile="vnext-read-only",
+                )
+            )
+            return role, task_id, executor(
+                task,
+                {
+                    "output_schema_ref": schema_ref,
+                    "prompt": "Return exactly the schema-compliant JSON answer probe-ok. Use no tools.",
+                },
+            )
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="host-capability") as pool:
+            futures = [pool.submit(execute_role, role) for role in ("worker", "top")]
+            for future in futures:
+                role, task_id, raw = future.result()
+                executions[role] = raw
+                task_ids[role] = task_id
+        finished_at = _now()
+        observed_starts = [item.observed_started_at for item in executions.values()]
+        observed_finishes = [item.observed_finished_at for item in executions.values()]
+        if all(isinstance(item, datetime) for item in observed_starts):
+            started_at = min(observed_starts)
+        if all(isinstance(item, datetime) for item in observed_finishes):
+            finished_at = max(observed_finishes)
+
+        session_records: dict[str, dict[str, Any]] = {}
+        for role in ("worker", "top"):
+            raw = executions[role]
+            session_id, output = _host_probe_output(raw, role)
+            events_ref = f"evidence/host-capability-probe/{role}-events.jsonl"
+            context_ref = f"evidence/host-capability-probe/{role}-turn-context.json"
+            output_ref = f"evidence/host-capability-probe/{role}-output.json"
+            events_path = _create_once_or_verify_bytes(
+                root,
+                events_ref,
+                raw.stdout_bytes or b"".join(_canonical(item) for item in raw.events),
+            )
+            context_path = _create_once_or_verify_json(root, context_ref, raw.turn_context)
+            output_path = _create_once_or_verify_json(root, output_ref, output)
+            task_id = task_ids[role]
+            request_ref = f"runtime/watchdogs/000-host-capability-probe/{task_id}/request.json"
+            terminal_ref = f"runtime/watchdogs/000-host-capability-probe/{task_id}/terminal.json"
+            rollout_path = _find_session_rollout(homes[role], session_id)
+            if rollout_path is None or rollout_path.stat().st_size > 4 * 1024 * 1024:
+                raise RuntimeFailure(f"host capability {role} rollout is missing or oversized")
+            session_records[role] = {
+                "session_id": session_id,
+                "model": "gpt-5.6-terra" if role == "worker" else "gpt-5.6-sol",
+                "reasoning_effort": "xhigh",
+                "codex_home": os.fspath(homes[role]),
+                "events_ref": events_ref,
+                "events_sha256": _digest(events_path.read_bytes()),
+                "turn_context_ref": context_ref,
+                "turn_context_sha256": _digest(context_path.read_bytes()),
+                "output_ref": output_ref,
+                "output_sha256": _digest(output_path.read_bytes()),
+                "supervisor_request_ref": request_ref,
+                "supervisor_request_sha256": _digest((root / request_ref).read_bytes()),
+                "supervisor_terminal_ref": terminal_ref,
+                "supervisor_terminal_sha256": _digest((root / terminal_ref).read_bytes()),
+                "rollout_path": os.fspath(rollout_path),
+                "rollout_bytes": rollout_path.stat().st_size,
+                "rollout_sha256": _digest_file(rollout_path),
+            }
+
+        denial_report = _run_host_read_only_denials(root, codex_path, homes["worker"])
+        denial_ref = "evidence/host-capability-probe/read-only-denials.json"
+        denial_path = _create_once_or_verify_json(root, denial_ref, denial_report)
+        test_ref = "evidence/host-capability-probe/focused-tests.txt"
+        test_path = _create_once_or_verify_bytes(root, test_ref, _run_host_contract_tests())
+        statuses = {
+            name: "unavailable" if name == "sandbox_isolation" else "pass"
+            for name in CAPABILITY_NAMES
+        }
+        observed_at = _now()
+        receipt = {
+            "schema_version": "agent-workflow.host-capability-receipt.v1",
+            "observed_at": _timestamp(observed_at),
+            "producer": {
+                "name": "agent-workflow-host-capability-probe",
+                "runtime_bundle_sha256": _runtime_bundle_sha256(),
+                "codex_cli_version": codex_version,
+                "codex_binary_sha256": codex_sha256,
+            },
+            "relevant_root": os.fspath(worker_root),
+            "execution": {
+                "started_at": _timestamp(started_at),
+                "finished_at": _timestamp(finished_at),
+                "role_count": 2,
+                "terminal_count": 2,
+            },
+            "sessions": session_records,
+            "deterministic_denials": {
+                "evidence_ref": denial_ref,
+                "evidence_sha256": _digest(denial_path.read_bytes()),
+            },
+            "focused_tests": {
+                "evidence_ref": test_ref,
+                "evidence_sha256": _digest(test_path.read_bytes()),
+            },
+            "capabilities": statuses,
+        }
+        receipt_path = create_once_json(root, receipt_ref, receipt)
+        receipt_sha256 = _digest(receipt_path.read_bytes())
+        summary = _host_capability_summary(
+            observed_at=_timestamp(observed_at),
+            codex_version=codex_version,
+            codex_sha256=codex_sha256,
+            receipt_ref=receipt_ref,
+            receipt_sha256=receipt_sha256,
+            statuses=statuses,
+        )
+        summary_path = create_once_json(root, summary_ref, summary)
+        _validate_host_capability_provenance(
+            root,
+            receipt,
+            running_bundle=_runtime_bundle_sha256(),
+            codex_sha256=codex_sha256,
+            codex_version=codex_version,
+            worker_root=worker_root,
+        )
+        return {
+            "status": "pass",
+            "evidence_ref": summary_ref,
+            "evidence_sha256": _digest(summary_path.read_bytes()),
+            "capability_bindings": _host_workflow_bindings(
+                summary, summary_ref, _digest(summary_path.read_bytes())
+            ),
+            "replayed": False,
+            "sessions": {role: item["session_id"] for role, item in session_records.items()},
+        }
+    finally:
+        for home in homes.values():
+            _cleanup_codex_auth(home)
+
+
 def _probe_source_write_command(
     root: Path,
     auth_source: Path,
@@ -3549,6 +4446,36 @@ def _probe_source_write_command(
 
     root = Path(root).resolve()
     probe_root = root / "evidence" / "source-write-probe"
+    codex_path, codex_sha256, codex_version = _codex_identity(codex_binary)
+    evidence_ref = "evidence/source-write-capability.json"
+    evidence_path = root / evidence_ref
+    _scrub_stale_codex_auth(probe_root)
+    if evidence_path.is_file() and not evidence_path.is_symlink():
+        capability = {
+            "status": "pass",
+            "evidence_ref": evidence_ref,
+            "evidence_sha256": _digest(evidence_path.read_bytes()),
+        }
+        _validate_source_write_capability(
+            root,
+            capability,
+            running_bundle=_runtime_bundle_sha256(),
+            codex_sha256=codex_sha256,
+            codex_version=codex_version,
+            codex_binary=codex_path,
+        )
+        evidence = json.loads(evidence_path.read_bytes())
+        return {
+            **capability,
+            "session_id": evidence["session"]["id"],
+            "token_usage": {
+                "input": None,
+                "output": None,
+                "total": None,
+                "confidence": "replayed_terminal",
+            },
+            "replayed": True,
+        }
     workspace = probe_root / "workspace"
     allowed_root = workspace / "src/api"
     git_root = workspace / ".git"
@@ -3571,7 +4498,6 @@ def _probe_source_write_command(
         )
         + "\n"
     )
-    codex_path, codex_sha256, codex_version = _codex_identity(codex_binary)
     codex_home = _prepare_codex_home(
         probe_root,
         auth_source,
@@ -3767,7 +4693,6 @@ def _probe_source_write_command(
                 "network_enabled": False,
             },
         }
-        evidence_ref = "evidence/source-write-capability.json"
         evidence_path = create_once_json(root, evidence_ref, evidence)
         usage_events = [event for event in raw.events if event.get("type") == "turn.completed"]
         usage = usage_events[0].get("usage", {}) if len(usage_events) == 1 else {}
@@ -3787,6 +4712,7 @@ def _probe_source_write_command(
                 ),
                 "confidence": "exact" if usage else "partial",
             },
+            "replayed": False,
         }
     finally:
         _cleanup_codex_auth(codex_home)
@@ -3826,6 +4752,12 @@ def main(argv: list[str] | None = None) -> int:
     source_probe.add_argument("--root", type=Path, required=True)
     source_probe.add_argument("--auth-source", type=Path, required=True)
     source_probe.add_argument("--codex-binary", default="codex")
+    host_probe = sub.add_parser("probe-host-capabilities")
+    host_probe.add_argument("--root", type=Path, required=True)
+    host_probe.add_argument("--repo", type=Path, required=True)
+    host_probe.add_argument("--relevant-root", required=True)
+    host_probe.add_argument("--auth-source", type=Path, required=True)
+    host_probe.add_argument("--codex-binary", default="codex")
     amend = sub.add_parser("amend")
     amend.add_argument("--root", type=Path, required=True)
     amend.add_argument("--request-source", type=Path, required=True)
@@ -3887,6 +4819,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "probe-source-write":
             summary = _probe_source_write_command(
                 args.root,
+                args.auth_source,
+                args.codex_binary,
+            )
+        elif args.command == "probe-host-capabilities":
+            summary = _probe_host_capabilities_command(
+                args.root,
+                args.repo,
+                args.relevant_root,
                 args.auth_source,
                 args.codex_binary,
             )
