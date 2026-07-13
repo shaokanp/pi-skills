@@ -198,7 +198,7 @@ def seal_amendment(root: Path, workflow: dict[str, Any], amendment: dict[str, An
     except ProtocolError as exc:
         raise RecoveryError(str(exc)) from exc
     current_authority, criteria = _amendment_state(root, workflow)
-    for plan_ref in _committed_plan_refs(root):
+    for plan_ref in _committed_plan_refs(root, workflow):
         phase_id = PurePosixPath(plan_ref).parts[1]
         if not (root / "phases" / phase_id / "receipt.json").is_file():
             raise RecoveryError("normal amendment can only seal at a terminal phase boundary")
@@ -283,12 +283,38 @@ def _results_by_lineage(root: Path) -> dict[str, list[tuple[str, dict[str, Any],
     return result
 
 
-def _committed_plan_refs(root: Path) -> set[str]:
+def _expected_generation_claim(
+    workflow: dict[str, Any],
+    plan: dict[str, Any],
+    plan_payload: bytes,
+) -> tuple[str, dict[str, Any]]:
+    contention = {
+        "predecessor_sha256": plan["predecessor_sha256"],
+        "authority_revision": plan["authority_revision"],
+    }
+    contention_key = _digest(_canonical(contention))
+    claim = {
+        "schema_version": "agent-workflow.generation-claim.vnext.v1",
+        "workflow_id": workflow["workflow_id"],
+        "generation_id": plan["generation_id"],
+        "phase_id": plan["phase_id"],
+        "predecessor_sha256": plan["predecessor_sha256"],
+        "authority_revision": plan["authority_revision"],
+        "plan_sha256": _digest(plan_payload),
+        "contention_key": contention_key,
+    }
+    return (
+        f"generations/claims/{contention_key.removeprefix('sha256:')}.json",
+        claim,
+    )
+
+
+def _committed_plan_refs(root: Path, workflow: dict[str, Any]) -> set[str]:
     refs: set[str] = set()
     claims_root = root / "generations" / "claims"
     paths = sorted(claims_root.glob("*.json")) if claims_root.is_dir() else []
     for path in paths:
-        claim, _ = _load_json(path, "generation claim")
+        claim, claim_payload = _load_json(path, "generation claim")
         try:
             validate_sidecar("generation-claim", claim)
         except ProtocolError as exc:
@@ -297,8 +323,23 @@ def _committed_plan_refs(root: Path) -> set[str]:
         plan_path = root / plan_ref
         if plan_path.is_symlink() or not plan_path.is_file():
             raise RecoveryError("generation claim references a missing phase plan")
-        if _digest(plan_path.read_bytes()) != claim["plan_sha256"]:
-            raise RecoveryError("generation claim phase plan digest drifted")
+        plan, plan_payload = _load_json(plan_path, "generation claim phase plan")
+        try:
+            validate_contract("phase-plan", plan)
+        except ProtocolError as exc:
+            raise RecoveryError("generation claim phase plan contract is invalid") from exc
+        if plan_payload != _canonical(plan):
+            raise RecoveryError("generation claim phase plan bytes are not canonical")
+        expected_ref, expected_claim = _expected_generation_claim(
+            workflow, plan, plan_payload
+        )
+        actual_ref = path.relative_to(root).as_posix()
+        if (
+            actual_ref != expected_ref
+            or claim != expected_claim
+            or claim_payload != _canonical(expected_claim)
+        ):
+            raise RecoveryError("generation claim does not bind the exact plan authority")
         refs.add(plan_ref)
     return refs
 
@@ -326,7 +367,11 @@ def prepare_phase_authority(
             raise RecoveryError("phase task criterion revision is not current")
 
     current_plan_ref = f"phases/{plan['phase_id']}/plan.json"
-    committed_plan_refs = _committed_plan_refs(root)
+    committed_plan_refs = _committed_plan_refs(root, workflow)
+    if reconciling and current_plan_ref not in committed_plan_refs:
+        raise RecoveryError("reconcile phase requires its exact committed generation claim")
+    if reconciling and (root / current_plan_ref).read_bytes() != _canonical(plan):
+        raise RecoveryError("reconcile phase plan drifted from its exact committed authority")
     other_plans = sorted(ref for ref in committed_plan_refs if ref != current_plan_ref)
     terminal_receipts = sorted(root.glob("phases/*/receipt.json"))
     if not terminal_receipts:
@@ -341,7 +386,12 @@ def prepare_phase_authority(
     else:
         if not plan["caused_by"]:
             raise RecoveryError("additional phase must name terminal causal phases")
-        current_projection = build_resume_brief(root, workflow, plan["generation_id"])
+        current_projection = build_resume_brief(
+            root,
+            workflow,
+            plan["generation_id"],
+            reconciling_phase_id=plan["phase_id"] if reconciling else None,
+        )
         terminal_phases = current_projection["terminal_phases"]
         if not terminal_phases or plan["caused_by"][-1] != terminal_phases[-1]["phase_id"]:
             raise RecoveryError("additional phase must descend from the latest terminal phase")
@@ -485,10 +535,21 @@ def commit_phase_authority(root: Path, authority: PhaseAuthority) -> list[str]:
     return refs
 
 
-def build_resume_brief(root: Path, workflow: dict[str, Any], generation_id: str) -> dict[str, Any]:
+def build_resume_brief(
+    root: Path,
+    workflow: dict[str, Any],
+    generation_id: str,
+    *,
+    reconciling_phase_id: str | None = None,
+) -> dict[str, Any]:
     """Build one compact, deterministic brief from authoritative artifacts only."""
 
     generation_id = _safe_id(generation_id, "resume generation id")
+    if reconciling_phase_id is not None:
+        reconciling_phase_id = _safe_id(reconciling_phase_id, "reconciling phase id")
+        current_plan_ref = f"phases/{reconciling_phase_id}/plan.json"
+        if current_plan_ref not in _committed_plan_refs(root, workflow):
+            raise RecoveryError("reconcile phase requires its exact committed generation claim")
     try:
         reconcile_summary = reconcile_supervisors(root, grace_seconds=0.0)
     except SupervisorFailure as exc:
@@ -537,7 +598,8 @@ def build_resume_brief(root: Path, workflow: dict[str, Any], generation_id: str)
         remaining.remove(candidates[0])
     unfinished = sorted(
         PurePosixPath(plan_ref).parts[1]
-        for plan_ref in _committed_plan_refs(root)
+        for plan_ref in _committed_plan_refs(root, workflow)
+        if PurePosixPath(plan_ref).parts[1] != reconciling_phase_id
         if not (root / "phases" / PurePosixPath(plan_ref).parts[1] / "receipt.json").is_file()
     )
     if unfinished:

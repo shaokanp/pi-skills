@@ -2374,7 +2374,7 @@ def _reconcile_run(
     summary = reconcile_supervisors(root, grace_seconds=grace_seconds)
     materialized_receipts: list[str] = []
     if not summary["active"]:
-        for plan_ref in sorted(_committed_plan_refs(root)):
+        for plan_ref in sorted(_committed_plan_refs(root, workflow)):
             plan_path = root / plan_ref
             phase_root = plan_path.parent
             if (phase_root / "receipt.json").exists():
