@@ -51,6 +51,13 @@ workflow additionally runs `probe-source-write` and replaces only the returned
 `sandbox_isolation` binding with that live writer-probe binding. The two
 commands write only under the new workflow root; the host probe reads an
 isolated source snapshot, and the writer probe uses its own synthetic workspace.
+The writer probe is not exempt from source launch fencing: the host seals that
+synthetic workspace before constructing the Task and revalidates it at the
+watchdog launch boundary through no-follow directory descriptors. The manifest
+binds root and descendant device/inode/type/owner/mode/link identity plus file
+digests. An unfenced write Task, replaced root or ancestor, or intervening file,
+symlink, hardlink, or unsafe-node drift blocks admission before the supervisor
+launches, without expanding access to the live repository.
 Evidence is bundle/Codex/root-bound, expires after 24 hours, and
 fails closed on tampering or route drift. The host receipt binds the snapshot
 manifest ref and digest. Initial `admit` replays that existing create-once
