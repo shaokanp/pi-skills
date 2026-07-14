@@ -14,10 +14,10 @@
     {
       "id": "agent-workflow",
       "display_name": "Agent Workflow",
-      "description": "Orchestrate agent teams and gated multi-round loops with planned lanes, durable state, challenge, verification, and repair.",
+      "description": "Run native agent teams that parallelize independent work and improve quality through evidence-based challenge, review, bounded repair, and fresh-context verification.",
       "source": "skills/agent-workflow",
       "production_target": "agent-workflow",
-      "version": "1.0.1",
+      "version": "2.0.0",
       "status": "stable",
       "visibility": "public"
     },

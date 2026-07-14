@@ -1,8 +1,0 @@
-{
-  "session_id": "orchestrator-1",
-  "turn_id": "turn-2",
-  "transcript_path": "orchestrator-rollout.jsonl",
-  "hook_event_name": "Stop",
-  "permission_mode": "never",
-  "last_assistant_message": "terminal payload"
-}
