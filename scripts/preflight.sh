@@ -23,15 +23,6 @@ if [[ -n "$REUSED_RECEIPT" ]]; then
   exit 0
 fi
 
-if [[ "${PI_SKILLS_VALIDATION_TMP_ACTIVE:-0}" != "1" ]]; then
-  REENTRY=(bash "$ROOT/scripts/preflight.sh")
-  if [[ "$FORCE" -eq 1 ]]; then
-    REENTRY+=(--force)
-  fi
-  exec python3 -B "$ROOT/skills/agent-workflow/scripts/validation_tmp.py" run \
-    --repo "$ROOT" -- "${REENTRY[@]}"
-fi
-
 STAGES_JSON="$(mktemp "${TMPDIR:-/tmp}/pi-skills-preflight-stages.XXXXXX")"
 trap 'rm -f "$STAGES_JSON"' EXIT
 printf '[]\n' >"$STAGES_JSON"

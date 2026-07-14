@@ -1,7 +1,0 @@
-{
-  "schema_version": "agent-workflow.runtime-harness-scenario.v1",
-  "name": "terminal_input_drift",
-  "kind": "terminal_transport_contract",
-  "mutation": "change_input_after_output_and_receipt",
-  "expected": "frozen_dispatch_digest_passes_only_with_terminal_transport"
-}

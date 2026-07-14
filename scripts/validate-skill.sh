@@ -6,19 +6,7 @@ SKILL_ID="${1:-}"
 MODE="${2:-}"
 
 AGENT_WORKFLOW_TESTS=(
-  test_model_routing.py
-  test_execution_efficiency.py
-  test_token_accounting.py
-  test_swarm_card.py
-  test_vnext_suite.py
-  test_vnext_candidate.py
-  test_vnext_accounting.py
-  test_vnext_canary.py
-  test_inspect_legacy.py
-  test_vnext_runtime.py
-  test_process_supervisor.py
-  test_source_workspace.py
-  test_recovery_runtime.py
+  test_native_team_skill.py
 )
 
 if [[ -z "$SKILL_ID" ]]; then
@@ -36,11 +24,6 @@ if [[ "$MODE" == "--list-tests" ]]; then
   fi
   printf '%s\n' "${AGENT_WORKFLOW_TESTS[@]}"
   exit 0
-fi
-
-if [[ "$SKILL_ID" == "agent-workflow" && "${PI_SKILLS_VALIDATION_TMP_ACTIVE:-0}" != "1" ]]; then
-  exec python3 -B "$ROOT/skills/agent-workflow/scripts/validation_tmp.py" run \
-    --repo "$ROOT" -- bash "$ROOT/scripts/validate-skill.sh" "$SKILL_ID"
 fi
 
 registry_value() {

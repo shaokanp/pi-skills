@@ -200,19 +200,16 @@ class MaintenanceHarnessTests(unittest.TestCase):
         self.assertEqual(direct.returncode, 97)
         self.assertIn("duplicate skill validation executed", direct.stderr)
 
-    def test_heavy_validation_entrypoints_use_the_policy_tmp_wrapper(self) -> None:
-        validation = (self.root / "scripts" / "validate-skill.sh").read_text(encoding="utf-8")
-        preflight = (self.root / "scripts" / "preflight.sh").read_text(encoding="utf-8")
-        canary = (
-            self.root / "skills" / "agent-workflow" / "scripts" / "test_vnext_canary.py"
-        ).read_text(encoding="utf-8")
+    def test_public_tree_uses_current_worktree_files_during_deletion(self) -> None:
+        obsolete = self.root / "docs" / "release.md"
+        obsolete.unlink()
+        manifest_path = self.root / "public-files.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["allowed_files"].remove("docs/release.md")
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
-        self.assertIn("validation_tmp.py", validation)
-        self.assertIn("PI_SKILLS_VALIDATION_TMP_ACTIVE", validation)
-        self.assertIn("validation_tmp.py", preflight)
-        self.assertIn("PI_SKILLS_VALIDATION_TMP_ACTIVE", preflight)
-        self.assertIn("validation_tmp.py", canary)
-        self.assertIn("PI_SKILLS_VALIDATION_TMP_ACTIVE", canary)
+        observed = self.run_python("scripts/validate_public_tree.py", ".")
+        self.assertEqual(observed.returncode, 0, observed.stderr)
 
     def test_agent_workflow_release_suites_have_a_nonexecuting_manifest(self) -> None:
         observed = self.run_script("scripts/validate-skill.sh", "agent-workflow", "--list-tests")
@@ -220,19 +217,7 @@ class MaintenanceHarnessTests(unittest.TestCase):
         self.assertEqual(
             observed.stdout.splitlines(),
             [
-                "test_model_routing.py",
-                "test_execution_efficiency.py",
-                "test_token_accounting.py",
-                "test_swarm_card.py",
-                "test_vnext_suite.py",
-                "test_vnext_candidate.py",
-                "test_vnext_accounting.py",
-                "test_vnext_canary.py",
-                "test_inspect_legacy.py",
-                "test_vnext_runtime.py",
-                "test_process_supervisor.py",
-                "test_source_workspace.py",
-                "test_recovery_runtime.py",
+                "test_native_team_skill.py",
             ],
         )
 

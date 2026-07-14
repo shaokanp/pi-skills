@@ -10,7 +10,7 @@ scheduler, or a background daemon that the runtime does not already provide.
 | Skill | Status | Use when | You get | Not for |
 | --- | --- | --- | --- | --- |
 | `explain` | Stable | You need to understand a non-trivial system, spec, diff, artifact, or multi-round history. | An evidence-backed explanation of structure, mechanism, status, and boundaries. | Correctness review or implementation. |
-| `agent-workflow` | Experimental | You want the current runtime to coordinate an agent team, subagents, or a gated multi-round loop. | Planner-selected lanes and durable state. A passing run delivers the work; an early stop records the proven state, blocker, and resume condition. | Ordinary single-agent work or an unattended daemon. |
+| `agent-workflow` | Stable | You explicitly want a native agent team, parallel specialists, adversarial review, or fresh-context verification. | The current agent orchestrates the smallest useful team, parallelizes ready work, challenges material claims, and independently verifies source changes. | Ordinary single-agent work, hosts without native collaboration tools, or an unattended daemon. |
 | `write-good-goal` | Stable | You want to create, refine, or audit a paste-ready coding-agent goal. | A bounded goal contract with achievable Done criteria and honest follow-up or human gates. | Executing the goal or writing a full project plan. |
 
 `Stable` means the public contract is intended to remain backward-compatible.
@@ -19,8 +19,8 @@ releases. Repository preflight validates structure, available regressions,
 packaging, and public-safety rules; neither label nor preflight proves semantic
 correctness for every task.
 
-`agent-workflow` is the canonical skill id. The internal `.workflow` schema
-keeps its existing `agent-loops.*` prefix for backward compatibility.
+`agent-workflow` is the canonical skill id. Version 2.0 uses native collaboration
+tools directly and ships no separate agent runtime or compatibility executor.
 
 ## Skill Guides
 
@@ -103,13 +103,6 @@ receipt is stored in the worktree's Git metadata and binds the exact public
 tree, toolchain, local policy, and validator. Repeating pre-push or local-release
 steps for the same fingerprint reuses that receipt; any relevant byte or
 environment change invalidates it.
-
-Heavy Agent Workflow validation is executed through a lease-bound temporary
-root. Local macOS runs default to `/Volumes/OWC-4TB/tmp/pi-skills` only after a
-device-identity mount check; CI uses its explicit `RUNNER_TEMP`, and maintainers
-may set an existing `PI_SKILLS_TMP_ROOT`. If no policy-managed root is available,
-validation fails closed instead of silently filling the boot disk. See
-[`docs/agent-workflow-canary-storage.md`](docs/agent-workflow-canary-storage.md).
 
 ## Local Production
 

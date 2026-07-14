@@ -41,9 +41,13 @@ def main() -> int:
     allowed_files = set(manifest.get("allowed_files", []))
     allowed_prefixes = tuple(manifest.get("allowed_prefixes", []))
     forbidden_files = set(manifest.get("forbidden_files", []))
-    public_paths = set(
-        git_paths(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
-    )
+    public_paths = {
+        path
+        for path in git_paths(
+            root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"
+        )
+        if (root / path).is_file() or (root / path).is_symlink()
+    }
 
     failures: list[str] = []
     for path in sorted(public_paths):
