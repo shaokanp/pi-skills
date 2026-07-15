@@ -3,25 +3,7 @@
 ## Unreleased
 
 <!-- pi-skills:unreleased id=explain version=1.0.1 -->
-<!-- pi-skills:unreleased id=agent-workflow version=2.0.0 -->
 <!-- pi-skills:unreleased id=write-good-goal version=1.0.1 -->
-
-### Agent Workflow 2.0
-
-- Replaced Agent Workflow's orchestration contract with a native thin-team design.
-  Explicit invocation now makes the current agent the Orchestrator, launches fresh
-  specialists through native collaboration tools, and parallelizes independent work.
-- Added dynamic team design, disjoint writer ownership, evidence-shaped
-  challenge, original-owner bounded repair, and mandatory fresh read-only
-  verification for source changes. Model routing is now an optional host
-  capability instead of a reason to shell out.
-- Removed the previous external agent runtime, protocol fixtures, routing assets,
-  compatibility references, accounting tools, process supervision, and their tests.
-  The Agent Workflow package now ships only its native instruction contract, host
-  metadata, guides, eval corpus, and one repository contract test.
-- Rewrote the bilingual guides and normative design around one-prompt native
-  operation, cut over the root and host-facing interfaces, and added a focused
-  native-team behavior/evaluation corpus.
 
 ### Repository maintenance
 
@@ -45,6 +27,25 @@
 - Added Traditional Chinese and English guides for `explain` and `write-good-goal`.
 - Replaced the event-range-dependent Gitleaks Action wrapper with the official
   versioned container and an explicit full-`HEAD` history scan.
+
+## 2.0.0 - 2026-07-15
+
+<!-- pi-skills:release id=agent-workflow version=2.0.0 -->
+
+- Replaced Agent Workflow's orchestration contract with a native thin-team design.
+  Explicit invocation now makes the current agent the Orchestrator, launches fresh
+  specialists through native collaboration tools, and parallelizes independent work.
+- Added dynamic team design, disjoint writer ownership, evidence-shaped
+  challenge, original-owner bounded repair, and mandatory fresh read-only
+  verification for source changes. Model routing is now an optional host
+  capability instead of a reason to shell out.
+- Removed the previous external agent runtime, protocol fixtures, routing assets,
+  compatibility references, accounting tools, process supervision, and their tests.
+  The Agent Workflow package now ships only its native instruction contract, host
+  metadata, guides, eval corpus, and one repository contract test.
+- Rewrote the bilingual guides and normative design around one-prompt native
+  operation, cut over the root and host-facing interfaces, and added a focused
+  native-team behavior/evaluation corpus.
 
 ## 0.3.0 - 2026-07-10
 

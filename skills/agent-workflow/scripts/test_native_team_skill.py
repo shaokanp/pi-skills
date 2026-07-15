@@ -187,7 +187,11 @@ class NativeTeamSkillTests(unittest.TestCase):
         self.assertEqual(item["version"], "2.0.0")
         self.assertIn("native agent teams", item["description"])
         changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        self.assertIn("pi-skills:unreleased id=agent-workflow version=2.0.0", changelog)
+        markers = re.findall(
+            r"pi-skills:(?:unreleased|release) id=agent-workflow version=2\.0\.0",
+            changelog,
+        )
+        self.assertEqual(len(markers), 1)
         self.assertIn("Removed the previous external agent runtime", changelog)
         self.assertIn("ships only its native instruction contract", changelog)
 
