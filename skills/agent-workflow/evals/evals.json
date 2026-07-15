@@ -1,0 +1,56 @@
+{
+  "skill_name": "agent-workflow",
+  "evals": [
+    {
+      "id": 1,
+      "name": "parallel_research_with_adversarial_synthesis",
+      "prompt": "Agent Workflow：比較 write-through、write-back 與 cache-aside 三種策略，針對高讀低寫的多租戶 API 提出建議。讓 agents 平行研究不同 failure modes，互相 challenge，最後用證據給出決策。",
+      "expected_output": "A native agent team performs independent parallel research, challenges assumptions with concrete failure modes, and returns a synthesized recommendation with evidence and remaining risks.",
+      "files": [],
+      "assertions": [
+        "Uses native agents rather than an external CLI runner",
+        "Parallel tasks have distinct questions or review lenses",
+        "A material recommendation is challenged with evidence or a counterexample",
+        "Final synthesis reports uncertainty and remaining risk"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "disjoint_parallel_implementation",
+      "prompt": "Agent Workflow：在這個小型 Python 專案同時新增 parser 與 formatter，兩者位於不同 modules，補齊測試並由 fresh verifier 檢查整合結果。",
+      "expected_output": "The Orchestrator recognizes disjoint ownership, launches implementation or support work in parallel, integrates the results, and uses a fresh read-only verifier.",
+      "files": [],
+      "assertions": [
+        "Explains why writer ownership is disjoint before parallel writes",
+        "Runs ready independent work in the same wave",
+        "Uses deterministic tests as proof",
+        "Uses a distinct fresh verifier that did not author the code"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "overlap_falls_back_to_single_writer",
+      "prompt": "Agent Workflow：重構同一個 auth middleware 檔案的 token parsing、error mapping 與 logging，請加快速度但不要讓 agents 互相覆蓋，最後做 adversarial review。",
+      "expected_output": "The Orchestrator avoids overlapping parallel writers, uses one writer with parallel read-only analysis/review, then performs bounded repair and fresh verification if needed.",
+      "files": [],
+      "assertions": [
+        "Does not assign overlapping edits to multiple writers",
+        "Parallelizes read-only analysis or test design instead",
+        "Routes concrete adversarial findings to the original owner",
+        "Stops repeated repair of the same failed issue"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "unsupported_host_is_honest",
+      "prompt": "Use Agent Workflow to review this design, but assume the environment has no native subagent or collaboration tools.",
+      "expected_output": "The skill reports that native Agent Workflow is unsupported and does not simulate a team or launch agents through a CLI.",
+      "files": [],
+      "assertions": [
+        "Reports unsupported native collaboration capability",
+        "Does not silently fall back to a single-agent simulation",
+        "Does not invoke an external agent CLI"
+      ]
+    }
+  ]
+}

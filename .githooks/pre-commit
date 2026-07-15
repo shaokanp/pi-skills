@@ -2,6 +2,18 @@
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
+COMMIT_INDEX="$(git rev-parse --git-path index)"
+if [[ "$COMMIT_INDEX" != /* ]]; then
+  COMMIT_INDEX="$(cd "$(dirname "$COMMIT_INDEX")" && pwd -P)/$(basename "$COMMIT_INDEX")"
+fi
 
-bash "$ROOT/scripts/validate-all.sh"
-bash "$ROOT/scripts/check-public.sh" --index --require-local-markers
+# Git exports repository-local variables to hooks. An absolute GIT_DIR from a
+# linked worktree would otherwise leak into validation subprocesses, causing
+# fixture repositories created by the test suite to mutate the real worktree.
+while IFS= read -r variable; do
+  unset "$variable"
+done < <(git rev-parse --local-env-vars)
+
+GIT_INDEX_FILE="$COMMIT_INDEX" git -C "$ROOT" diff --cached --check
+GIT_INDEX_FILE="$COMMIT_INDEX" \
+  bash "$ROOT/scripts/check-public.sh" --index --require-local-markers

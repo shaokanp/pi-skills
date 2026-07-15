@@ -10,7 +10,7 @@ scheduler, or a background daemon that the runtime does not already provide.
 | Skill | Status | Use when | You get | Not for |
 | --- | --- | --- | --- | --- |
 | `explain` | Stable | You need to understand a non-trivial system, spec, diff, artifact, or multi-round history. | An evidence-backed explanation of structure, mechanism, status, and boundaries. | Correctness review or implementation. |
-| `agent-workflow` | Experimental | You want the current runtime to coordinate an agent team, subagents, or a gated multi-round loop. | Planner-selected lanes and durable state. A passing run delivers the work; an early stop records the proven state, blocker, and resume condition. | Ordinary single-agent work or an unattended daemon. |
+| `agent-workflow` | Stable | You explicitly want a native agent team, parallel specialists, adversarial review, or fresh-context verification. | The current agent orchestrates the smallest useful team, parallelizes ready work, challenges material claims, and independently verifies source changes. | Ordinary single-agent work, hosts without native collaboration tools, or an unattended daemon. |
 | `write-good-goal` | Stable | You want to create, refine, or audit a paste-ready coding-agent goal. | A bounded goal contract with achievable Done criteria and honest follow-up or human gates. | Executing the goal or writing a full project plan. |
 
 `Stable` means the public contract is intended to remain backward-compatible.
@@ -19,8 +19,8 @@ releases. Repository preflight validates structure, available regressions,
 packaging, and public-safety rules; neither label nor preflight proves semantic
 correctness for every task.
 
-`agent-workflow` is the canonical skill id. The internal `.workflow` schema
-keeps its existing `agent-loops.*` prefix for backward compatibility.
+`agent-workflow` is the canonical skill id. Version 2.0 uses native collaboration
+tools directly and ships no separate agent runtime or compatibility executor.
 
 ## Skill Guides
 
@@ -77,7 +77,8 @@ For a Claude Code skills directory, pass that directory explicitly as
    an `unreleased` marker under `## Unreleased`, or a `release` marker under a
    dated release heading. The validator cannot infer behavior changes from a
    Git diff, so maintainers must make that version decision explicitly.
-4. Follow `CONTRIBUTING.md` and run the complete preflight:
+4. During development, run focused tests for the seam being changed. After the
+   source tree is frozen, run the complete preflight once:
 
 ```bash
 bash scripts/preflight.sh
@@ -97,7 +98,11 @@ local release; use `publish-preflight.sh` for the Gitleaks-backed publish gate.
 
 The preflight validates every registered skill, scans the publishable tree for
 private paths and common secret formats, builds release archives under `dist/`,
-and scans generated artifact metadata before it can be published.
+and scans generated artifact metadata before it can be published. A passing
+receipt is stored in the worktree's Git metadata and binds the exact public
+tree, toolchain, local policy, and validator. Repeating pre-push or local-release
+steps for the same fingerprint reuses that receipt; any relevant byte or
+environment change invalidates it.
 
 ## Local Production
 
@@ -135,7 +140,8 @@ Run the strict publish gate before the first public push:
 bash scripts/publish-preflight.sh
 ```
 
-The pre-commit hook scans the staged Git index. The pre-push hook reads Git's
+The pre-commit hook runs only fast diff/static and staged-index safety checks.
+The pre-push hook runs or reuses the complete preflight, then reads Git's
 ref update stream and scans the commits and annotated tags actually being sent;
 on the first push to an empty remote, that means the complete reachable history.
 The strict publish gate also runs Gitleaks against an archive of the tracked

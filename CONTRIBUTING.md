@@ -45,7 +45,8 @@ brew install gitleaks
 bash scripts/install-hooks.sh
 ```
 
-Before committing:
+During development, run focused tests. After the source tree is frozen, run one
+complete preflight:
 
 ```bash
 bash scripts/preflight.sh
@@ -62,10 +63,13 @@ Before publishing:
 bash scripts/publish-preflight.sh
 ```
 
-The pre-commit hook scans the Git index. The pre-push hook requires a clean
-tree, rebuilds public packages, scans the exact refs being pushed, and runs
-Gitleaks. GitHub CI repeats the public-tree, package, current-branch history,
-and secret checks.
+The preflight writes a Git-metadata receipt bound to the exact public tree,
+toolchain, local policy, and validator. The pre-commit hook stays fast: staged
+diff/static and public-index checks only. The pre-push and local-release paths
+run or reuse the exact receipt instead of rerunning the same suite. Pre-push
+still scans exact refs and runs Gitleaks. GitHub CI remains an independent remote
+boundary and repeats public-tree, package, current-branch history, and secret
+checks.
 
 ## Local Installation
 

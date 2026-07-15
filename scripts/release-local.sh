@@ -137,7 +137,9 @@ if ! command -v rsync >/dev/null 2>&1; then
   exit 1
 fi
 
-bash "$ROOT/scripts/check-public.sh"
+# One exact-tree preflight authorizes both dry-run and execute. A second call
+# reuses the same receipt instead of rerunning the release suite.
+bash "$ROOT/scripts/preflight.sh"
 
 release_one() {
   local id="$1"
@@ -146,9 +148,6 @@ release_one() {
   target_name="$(registry_value "$id" production_target)"
   source_dir="$ROOT/$source_rel/"
   target_dir="$TARGET_ROOT/$target_name/"
-
-  bash "$ROOT/scripts/validate-skill.sh" "$id"
-  bash "$ROOT/scripts/package-skill.sh" "$id" >/dev/null
 
   if [[ "$EXECUTE" -eq 0 ]]; then
     echo "dry-run local release: $source_rel -> $target_dir"

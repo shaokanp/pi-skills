@@ -115,6 +115,112 @@ class MaintenanceHarnessTests(unittest.TestCase):
         self.assertEqual(verified.returncode, 0, verified.stderr)
         self.assertIn("doctor passed (strict local)", verified.stdout)
 
+    def test_pre_commit_clears_inherited_repository_environment(self) -> None:
+        validation = self.root / "scripts" / "validate-all.sh"
+        assertion = (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "for variable in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX; do\n"
+            "  if [[ -n \"${!variable+x}\" ]]; then\n"
+            "    echo \"leaked repository variable: $variable\" >&2\n"
+            "    exit 1\n"
+            "  fi\n"
+            "done\n"
+        )
+        validation.write_text(assertion, encoding="utf-8")
+        validation.chmod(0o755)
+
+        private_marker = "alternate-index-" + "private-marker"
+        local_config = self.root / ".pi-skills.local.json"
+        local_config.write_text(
+            json.dumps({"private_markers": [private_marker]}) + "\n",
+            encoding="utf-8",
+        )
+        secret = self.root / "alternate-index-secret.txt"
+        secret.write_text(private_marker + "\n", encoding="utf-8")
+        alternate_index = Path(self.temp_dir.name) / "alternate-index"
+        shutil.copy2(self.root / ".git" / "index", alternate_index)
+        alternate_environment = os.environ.copy()
+        alternate_environment["GIT_INDEX_FILE"] = str(alternate_index)
+        subprocess.run(
+            ["git", "-C", str(self.root), "add", secret.name],
+            check=True,
+            env=alternate_environment,
+        )
+
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "GIT_DIR": str(self.root / ".git"),
+                "GIT_WORK_TREE": str(self.root),
+                "GIT_INDEX_FILE": str(alternate_index),
+                "GIT_PREFIX": "fixture-prefix/",
+                "PI_SKILLS_LOCAL_CONFIG": str(local_config),
+            }
+        )
+        result = subprocess.run(
+            [str(self.root / ".githooks" / "pre-commit")],
+            cwd=self.root,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(secret.name, result.stderr)
+        self.assertIn("public safety check failed (index)", result.stderr)
+
+    def test_release_graph_has_one_authoritative_preflight_entry(self) -> None:
+        pre_commit = (self.root / ".githooks" / "pre-commit").read_text(encoding="utf-8")
+        package_all = (self.root / "scripts" / "package-all.sh").read_text(encoding="utf-8")
+        release_local = (self.root / "scripts" / "release-local.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn("validate-all.sh", pre_commit)
+        self.assertIn("--preflight-validated", package_all)
+        self.assertEqual(release_local.count('scripts/preflight.sh'), 1)
+        self.assertNotIn('scripts/validate-skill.sh', release_local)
+        self.assertNotIn('scripts/package-skill.sh', release_local)
+
+    def test_preflight_packaging_does_not_repeat_skill_validation(self) -> None:
+        validator = self.root / "scripts" / "validate-skill.sh"
+        validator.write_text(
+            "#!/usr/bin/env bash\n"
+            "echo 'duplicate skill validation executed' >&2\n"
+            "exit 97\n",
+            encoding="utf-8",
+        )
+        validator.chmod(0o755)
+
+        validated = self.run_script("scripts/package-all.sh", "--preflight-validated")
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+        self.assertNotIn("duplicate skill validation executed", validated.stderr)
+
+        direct = self.run_script("scripts/package-skill.sh", "explain")
+        self.assertEqual(direct.returncode, 97)
+        self.assertIn("duplicate skill validation executed", direct.stderr)
+
+    def test_public_tree_uses_current_worktree_files_during_deletion(self) -> None:
+        obsolete = self.root / "docs" / "release.md"
+        obsolete.unlink()
+        manifest_path = self.root / "public-files.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["allowed_files"].remove("docs/release.md")
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+        observed = self.run_python("scripts/validate_public_tree.py", ".")
+        self.assertEqual(observed.returncode, 0, observed.stderr)
+
+    def test_agent_workflow_release_suites_have_a_nonexecuting_manifest(self) -> None:
+        observed = self.run_script("scripts/validate-skill.sh", "agent-workflow", "--list-tests")
+        self.assertEqual(observed.returncode, 0, observed.stderr)
+        self.assertEqual(
+            observed.stdout.splitlines(),
+            [
+                "test_native_team_skill.py",
+            ],
+        )
+
     def test_new_skill_scaffold_fails_until_completed_without_collision_changes(self) -> None:
         registry_before = (self.root / "registry.json").read_text(encoding="utf-8")
         changelog_before = (self.root / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -181,64 +287,6 @@ class MaintenanceHarnessTests(unittest.TestCase):
         result = self.run_script("scripts/validate-skill.sh", "explain")
         self.assertEqual(result.returncode, 1)
         self.assertIn("README.en.md contains incomplete placeholder", result.stderr)
-
-    def test_agent_workflow_validation_executes_vnext_release_suite(self) -> None:
-        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_vnext_suite.py"
-        sentinel.write_text(
-            "raise SystemExit('vnext release-gate sentinel executed')\n",
-            encoding="utf-8",
-        )
-
-        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("vnext release-gate sentinel executed", result.stderr)
-
-    def test_agent_workflow_validation_executes_vnext_runtime_suite(self) -> None:
-        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_vnext_runtime.py"
-        sentinel.write_text(
-            "raise SystemExit('vnext runtime-gate sentinel executed')\n",
-            encoding="utf-8",
-        )
-
-        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("vnext runtime-gate sentinel executed", result.stderr)
-
-    def test_agent_workflow_validation_executes_vnext_supervisor_suite(self) -> None:
-        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_process_supervisor.py"
-        sentinel.write_text(
-            "raise SystemExit('vnext supervisor-gate sentinel executed')\n",
-            encoding="utf-8",
-        )
-
-        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("vnext supervisor-gate sentinel executed", result.stderr)
-
-    def test_agent_workflow_validation_executes_vnext_source_workspace_suite(self) -> None:
-        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_source_workspace.py"
-        sentinel.write_text(
-            "raise SystemExit('vnext source-workspace-gate sentinel executed')\n",
-            encoding="utf-8",
-        )
-
-        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("vnext source-workspace-gate sentinel executed", result.stderr)
-
-    def test_agent_workflow_validation_executes_vnext_recovery_suite(self) -> None:
-        sentinel = self.root / "skills" / "agent-workflow" / "scripts" / "test_recovery_runtime.py"
-        sentinel.write_text(
-            "raise SystemExit('vnext recovery-gate sentinel executed')\n",
-            encoding="utf-8",
-        )
-        result = self.run_script("scripts/validate-skill.sh", "agent-workflow")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("vnext recovery-gate sentinel executed", result.stderr)
 
     def test_missing_current_changelog_marker_fails_closed(self) -> None:
         changelog = self.root / "CHANGELOG.md"

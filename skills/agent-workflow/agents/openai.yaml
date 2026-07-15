@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Workflow"
-  short_description: "Clean-Orchestrator multi-agent harness with sealed gates, review, verify, and repair"
-  default_prompt: "Use $agent-workflow with the default Main-to-one-clean-Orchestrator topology, seal every round's semantic gates and completion budget before dispatch, show the event-driven Swarm Card, use native subagents only after capability admission, and record target versus bounded-interim behavior honestly."
+  short_description: "Native thin agent team for parallel work, challenge, and fresh verification"
+  default_prompt: "Use $agent-workflow. Keep the current agent as Orchestrator, design the smallest high-value native team, launch ready independent specialists with fresh context, coordinate only material evidence and bounded repair, and use a fresh read-only verifier for source changes. Never use an external CLI or workflow runner for agent lifecycle."

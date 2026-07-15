@@ -1,5 +1,0 @@
-{
-  "schema_version": "agent-loops.orchestration.v2",
-  "workflow": {"title": "Legacy v2 fixture", "slug": "legacy-v2"},
-  "rounds": [{"round_id": "discover"}, {"round_id": "verify"}]
-}

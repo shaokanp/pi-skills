@@ -3,10 +3,27 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILL_ID="${1:-}"
+MODE="${2:-}"
+
+AGENT_WORKFLOW_TESTS=(
+  test_native_team_skill.py
+)
 
 if [[ -z "$SKILL_ID" ]]; then
-  echo "usage: scripts/validate-skill.sh <skill-id>" >&2
+  echo "usage: scripts/validate-skill.sh <skill-id> [--list-tests]" >&2
   exit 2
+fi
+if [[ -n "$MODE" && "$MODE" != "--list-tests" ]] || [[ -n "${3:-}" ]]; then
+  echo "usage: scripts/validate-skill.sh <skill-id> [--list-tests]" >&2
+  exit 2
+fi
+if [[ "$MODE" == "--list-tests" ]]; then
+  if [[ "$SKILL_ID" != "agent-workflow" ]]; then
+    echo "--list-tests is only available for agent-workflow" >&2
+    exit 2
+  fi
+  printf '%s\n' "${AGENT_WORKFLOW_TESTS[@]}"
+  exit 0
 fi
 
 registry_value() {
@@ -135,19 +152,9 @@ for path in sorted(root.glob("scripts/*.py")):
 PY
 
 if [[ "$SKILL_ID" == "agent-workflow" ]]; then
-  python3 "$SKILL_DIR/scripts/test_model_routing.py"
-  python3 "$SKILL_DIR/scripts/test_execution_efficiency.py"
-  python3 "$SKILL_DIR/scripts/test_token_accounting.py"
-  python3 "$SKILL_DIR/scripts/test_swarm_card.py"
-  python3 "$SKILL_DIR/scripts/test_vnext_suite.py"
-  python3 "$SKILL_DIR/scripts/test_vnext_candidate.py"
-  python3 "$SKILL_DIR/scripts/test_vnext_accounting.py"
-  python3 "$SKILL_DIR/scripts/test_vnext_canary.py"
-  python3 "$SKILL_DIR/scripts/test_inspect_legacy.py"
-  python3 "$SKILL_DIR/scripts/test_vnext_runtime.py"
-  python3 "$SKILL_DIR/scripts/test_process_supervisor.py"
-  python3 "$SKILL_DIR/scripts/test_source_workspace.py"
-  python3 "$SKILL_DIR/scripts/test_recovery_runtime.py"
+  for test_file in "${AGENT_WORKFLOW_TESTS[@]}"; do
+    python3 -B "$SKILL_DIR/scripts/$test_file"
+  done
 fi
 
 if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
