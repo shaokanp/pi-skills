@@ -28,24 +28,22 @@
 - Replaced the event-range-dependent Gitleaks Action wrapper with the official
   versioned container and an explicit full-`HEAD` history scan.
 
-## 2.0.0 - 2026-07-15
+## 1.0.0 - 2026-07-15
 
-<!-- pi-skills:release id=agent-workflow version=2.0.0 -->
+<!-- pi-skills:release id=agent-workflow version=1.0.0 -->
 
-- Replaced Agent Workflow's orchestration contract with a native thin-team design.
-  Explicit invocation now makes the current agent the Orchestrator, launches fresh
-  specialists through native collaboration tools, and parallelizes independent work.
-- Added dynamic team design, disjoint writer ownership, evidence-shaped
+- Introduced Agent Workflow as a native thin-team design. Explicit invocation
+  makes the current agent the Orchestrator, launches fresh specialists through
+  native collaboration tools, and parallelizes independent work.
+- Defined dynamic team design, disjoint writer ownership, evidence-shaped
   challenge, original-owner bounded repair, and mandatory fresh read-only
-  verification for source changes. Model routing is now an optional host
-  capability instead of a reason to shell out.
-- Removed the previous external agent runtime, protocol fixtures, routing assets,
-  compatibility references, accounting tools, process supervision, and their tests.
-  The Agent Workflow package now ships only its native instruction contract, host
-  metadata, guides, eval corpus, and one repository contract test.
-- Rewrote the bilingual guides and normative design around one-prompt native
-  operation, cut over the root and host-facing interfaces, and added a focused
-  native-team behavior/evaluation corpus.
+  verification for source changes. Model routing remains an optional host
+  capability rather than an external lifecycle dependency.
+- The public 1.0 package is intentionally small: its native instruction
+  contract, host metadata, bilingual guides, eval corpus, one repository
+  contract test, and license.
+- Added the normative architecture and implementation documents for one-prompt
+  native operation, plus a focused native-team behavior/evaluation corpus.
 
 ## 0.3.0 - 2026-07-10
 

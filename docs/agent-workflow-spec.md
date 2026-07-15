@@ -1,4 +1,4 @@
-# Agent Workflow 2.0 — Native Thin Team Specification
+# Agent Workflow — Native Thin Team Specification
 
 狀態：Architecture explanation；唯一 canonical source contract 是
 `skills/agent-workflow/SKILL.md`
@@ -16,7 +16,7 @@ collaboration tools 組成真正的 agent team。
 1. 把真正獨立的工作同時執行，降低 elapsed time；
 2. 用獨立思考、對抗性 falsification、review、bounded repair 與 fresh verifier 提高品質。
 
-2.0 不建立第二套 agent runtime，不以外部 CLI 啟動 agents，不要求使用者手動指定 team
+這個 1.0 contract 不建立第二套 agent runtime，不以外部 CLI 啟動 agents，不要求使用者手動指定 team
 或 review 對話，也不讓 workflow ceremony 比任務本身更大。
 
 ## 2. Architecture
@@ -194,7 +194,7 @@ only invalidated or unsafe work is interrupted.
 
 Semantic role and independent identity are normative. Per-agent model selection
 is not. The current native spawn surface does not guarantee model/reasoning
-overrides, so 2.0 does not shell out to manufacture Sol/Terra routing.
+overrides, so the contract does not shell out to manufacture Sol/Terra routing.
 
 If the host later exposes model-aware native spawn, routing may be added as an
 optional optimization. Missing routing must never disable native teamwork or

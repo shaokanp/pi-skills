@@ -2,7 +2,8 @@
 
 繁體中文 | [English](./README.en.md)
 
-Agent Workflow 2.0 是一個 thin、native、quality-first 的 agent team skill。使用者只要明確說
+Agent Workflow 1.0 是這個 skill 的公開起點：一個 thin、native、quality-first 的 agent team
+skill。使用者只要明確說
 「Agent Workflow」、「agent team」、「parallel agents」或「用多個 agents」，目前的 agent
 就會成為 Orchestrator，使用 Codex 原生 collaboration tools 自動組隊、平行分工、對抗、review、
 repair 與 fresh-context verification。
@@ -77,10 +78,10 @@ Agent lifecycle 只使用 host 原生能力：
 
 ## Model routing
 
-Codex 目前的 native `spawn_agent` surface 不保證 per-agent model／reasoning override。2.0 因此以
-Explorer、Builder、Challenger、Reviewer、Verifier 等 semantic roles 管理獨立性，不再為了強制
-Sol／Terra routing 繞去外部 CLI。未來 host 原生支援 model-aware spawn 時，可以在不改變核心
-workflow 的前提下加入 optional routing。
+Codex 目前的 native `spawn_agent` surface 不保證 per-agent model／reasoning override。這個
+contract 因此以 Explorer、Builder、Challenger、Reviewer、Verifier 等 semantic roles 管理
+獨立性，不以外部 CLI 強制 Sol／Terra routing。未來 host 原生支援 model-aware spawn 時，
+可以在不改變核心 workflow 的前提下加入 optional routing。
 
 ## 安裝與驗證
 

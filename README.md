@@ -19,8 +19,9 @@ releases. Repository preflight validates structure, available regressions,
 packaging, and public-safety rules; neither label nor preflight proves semantic
 correctness for every task.
 
-`agent-workflow` is the canonical skill id. Version 2.0 uses native collaboration
-tools directly and ships no separate agent runtime or compatibility executor.
+`agent-workflow` is the canonical skill id. Agent Workflow 1.0 is the public
+baseline: it uses native collaboration tools directly and ships no separate
+agent runtime or compatibility executor.
 
 ## Skill Guides
 

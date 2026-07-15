@@ -1,6 +1,6 @@
-# Agent Workflow 2.0 — Native Thin Team Implementation
+# Agent Workflow — Native Thin Team Implementation
 
-狀態：Source implementation complete；release promotion pending blind quality/elapsed evaluation
+狀態：Public 1.0 baseline released
 依據：`skills/agent-workflow/SKILL.md`
 日期：2026-07-15
 
@@ -54,7 +54,7 @@ maintenance tests, package contents, and generated artifacts.
 
 ## 4. Native dogfood receipt
 
-The source cutover was reviewed through the same native pattern:
+The source contract was reviewed through the same native pattern:
 
 - the current agent orchestrated two fresh read-only specialists in parallel;
 - material findings were repaired by the original owner;
@@ -68,9 +68,10 @@ The native collaboration surface did not expose exact descendant token totals or
 complete elapsed timer for the already-started run, so this receipt does not claim
 token or performance promotion evidence.
 
-## 5. Promotion gate
+## 5. Evolution gate
 
-Blind evaluation must judge frozen tasks in this order:
+Future material contract changes must use blind evaluation on frozen tasks in
+this order:
 
 1. correctness and required outcomes;
 2. evidence quality and regression coverage;
@@ -78,8 +79,9 @@ Blind evaluation must judge frozen tasks in this order:
 4. elapsed time and parallelism;
 5. total tokens when the host exposes complete accounting.
 
-Promotion requires correctness non-inferiority, no terminal failure, and either a
-material quality improvement or an elapsed-time improvement without quality loss.
+Promotion requires correctness non-inferiority, no terminal failure, and either
+a material quality improvement or an elapsed-time improvement without quality
+loss.
 
 ## 6. Repository and release gates
 

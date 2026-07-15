@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused contract tests for the Agent Workflow 2.0 native thin skill."""
+"""Focused contract tests for the Agent Workflow 1.0 native thin skill."""
 
 from __future__ import annotations
 
@@ -121,15 +121,15 @@ class NativeTeamSkillTests(unittest.TestCase):
         self.assertLessEqual(len(SKILL.split()), 1800)
         self.assertEqual(SKILL.count("# Agent Workflow"), 1)
 
-    def test_guides_describe_native_2_0(self) -> None:
+    def test_guides_describe_public_1_0(self) -> None:
         for text in (README_ZH, README_EN):
-            self.assertIn("2.0", text)
+            self.assertIn("1.0", text)
             self.assertIn("native", text.lower())
         self.assertIn("目前的 agent", README_ZH)
         self.assertIn("current agent becomes the Orchestrator", README_EN)
-        self.assertIn("ships no separate agent runtime", ROOT_README)
+        self.assertIn("ships no separate agent runtime", " ".join(ROOT_README.split()))
 
-    def test_host_interface_and_public_readme_match_native_2_0(self) -> None:
+    def test_host_interface_and_public_readme_match_public_1_0(self) -> None:
         for phrase in (
             "current agent as Orchestrator",
             "smallest high-value native team",
@@ -139,7 +139,7 @@ class NativeTeamSkillTests(unittest.TestCase):
             self.assertIn(phrase, OPENAI_INTERFACE)
         self.assertEqual(OPENAI_INTERFACE.count("default_prompt:"), 1)
         self.assertIn("| `agent-workflow` | Stable |", ROOT_README)
-        self.assertIn("Version 2.0 uses native collaboration", ROOT_README)
+        self.assertIn("Agent Workflow 1.0 is the public", ROOT_README)
 
     def test_guides_require_dry_run_before_install_execution(self) -> None:
         for guide in (README_ZH, README_EN):
@@ -181,19 +181,19 @@ class NativeTeamSkillTests(unittest.TestCase):
             self.assertTrue(item["expected_output"].strip())
             self.assertGreaterEqual(len(item["assertions"]), 3)
 
-    def test_registry_and_changelog_cut_over_together(self) -> None:
+    def test_registry_and_release_metadata_stay_aligned(self) -> None:
         registry = json.loads((REPO_ROOT / "registry.json").read_text(encoding="utf-8"))
         item = next(skill for skill in registry["skills"] if skill["id"] == "agent-workflow")
-        self.assertEqual(item["version"], "2.0.0")
+        self.assertEqual(item["version"], "1.0.0")
         self.assertIn("native agent teams", item["description"])
         changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         markers = re.findall(
-            r"pi-skills:(?:unreleased|release) id=agent-workflow version=2\.0\.0",
+            r"pi-skills:(?:unreleased|release) id=agent-workflow version=1\.0\.0",
             changelog,
         )
         self.assertEqual(len(markers), 1)
-        self.assertIn("Removed the previous external agent runtime", changelog)
-        self.assertIn("ships only its native instruction contract", changelog)
+        self.assertIn("Introduced Agent Workflow as a native thin-team design", changelog)
+        self.assertIn("public 1.0 package is intentionally small", changelog)
 
     def test_skill_frontmatter_has_trigger_focused_description(self) -> None:
         match = re.match(r"^---\n(.*?)\n---\n", SKILL, re.S)

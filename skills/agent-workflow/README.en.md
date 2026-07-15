@@ -2,7 +2,8 @@
 
 [繁體中文](./README.md) | English
 
-Agent Workflow 2.0 is a thin, native, quality-first agent-team skill. When the
+Agent Workflow 1.0 is the public baseline: a thin, native, quality-first
+agent-team skill. When the
 user explicitly asks for Agent Workflow, an agent team, parallel agents, or a
 swarm, the current agent becomes the Orchestrator and uses Codex's native
 collaboration tools to choose specialists, run independent work in parallel,
@@ -88,10 +89,10 @@ unsupported instead of simulating a team.
 ## Model routing
 
 The current native `spawn_agent` surface does not guarantee per-agent model or
-reasoning overrides. Version 2.0 therefore uses semantic roles—Explorer, Builder,
-Challenger, Reviewer, and Verifier—and no longer shells out merely to force
-Sol/Terra routing. Optional routing can be added later without changing the core
-workflow when the host exposes model-aware native spawn.
+reasoning overrides. This contract therefore uses semantic roles—Explorer,
+Builder, Challenger, Reviewer, and Verifier. External CLI routing is outside the
+contract. Optional routing can be added later without changing the core workflow
+when the host exposes model-aware native spawn.
 
 ## Install and validate
 
