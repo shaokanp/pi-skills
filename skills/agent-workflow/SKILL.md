@@ -137,9 +137,25 @@ stop and report the blocker instead of renaming the task or looping.
 
 ## 7. Coordinate without polling
 
-Use native terminal notifications as the progress surface. Wait for the current
-wave only after all useful local integration work is exhausted. Do not poll agent
-status, redraw workflow cards, narrate "still running", or use shell waits.
+Use native direct-parent terminal callbacks as the primary completion surface.
+Wait for the current wave only after all useful local integration work is
+exhausted. Do not poll agent status, redraw workflow cards, narrate "still
+running", or use shell waits. Children do not send progress chatter; before their
+terminal deliverable, they communicate only material evidence or dependencies
+that can change a decision.
+
+Treat `wait_agent` as a blocking mailbox wait, not a durable multi-worker
+all-terminal barrier. When the Orchestrator must block at a decision point, issue
+one wait using the longest host-safe window that fits the relevant task deadline
+and communication contract; terminal evidence may return it early. Any mailbox
+update or timeout may return it, and neither proves every spawned child is
+terminal.
+
+Track terminal evidence for every spawned child. After a timeout with no new
+evidence, do not immediately issue an identical re-wait. Continue useful work if
+any remains; otherwise let native terminal notification deliver the result. If
+the real deadline arrives without the required terminal evidence, report the
+blocker instead of claiming that the wave joined or completed.
 
 Preserve completed siblings. Cancel only work made obsolete by user steering,
 shared-assumption failure, unsafe writes, or an explicit stop.

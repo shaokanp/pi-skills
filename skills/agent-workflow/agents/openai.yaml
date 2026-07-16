@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Workflow"
   short_description: "Native thin agent team for parallel work, challenge, and fresh verification"
-  default_prompt: "Use $agent-workflow. Keep the current agent as Orchestrator, design the smallest high-value native team, launch ready independent specialists with fresh context, coordinate only material evidence and bounded repair, and use a fresh read-only verifier for source changes. Never use an external CLI or workflow runner for agent lifecycle."
+  default_prompt: "Use $agent-workflow. Keep the current agent as Orchestrator, design the smallest high-value native team, launch ready independent specialists with fresh context, coordinate only material evidence and bounded repair, and use a fresh read-only verifier for source changes. Treat direct-parent terminal callbacks as primary completion evidence. If blocking is necessary, issue one host-safe deadline-aligned wait for that decision point; after a timeout with no new evidence, do not immediately issue an identical re-wait. Require terminal evidence for every spawned child. Never use an external CLI or workflow runner for agent lifecycle."

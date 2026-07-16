@@ -20,6 +20,9 @@
 - Reworked all three skill descriptions around distinct trigger branches and
   routing boundaries between explanation, goal drafting, multi-agent execution,
   and ordinary direct work.
+- Hardened Agent Workflow waiting around native terminal callbacks: one
+  deadline-aligned blocking wait may return early, empty timeouts cannot become
+  status polling, and mailbox activity is not misreported as an all-terminal join.
 - Reordered the bilingual guides so first-time readers see when to use each skill,
   what it produces, what it does not do, and how to start before deep mechanics.
 - Added a repository-level skill chooser, defined maturity and preflight claims,

@@ -50,6 +50,13 @@ flowchart LR
 - 同一 upstream context 下的獨立研究、inspection、test design 與 review lenses 會一起啟動。
 - Source writers 只有在 write ownership 明確互斥時才平行；否則使用單一 writer 加平行 read-only 支援。
 - Orchestrator 不重做 worker 正在做的調查，也不輪詢狀態。
+- Native direct-parent terminal callback 是主要 completion surface；Specialist 不發 progress
+  chatter，只在 terminal deliverable 前傳遞會改變決策的 material evidence 或 dependency。
+- 若 Orchestrator 在一個 decision point 必須阻塞，只使用一次符合 task deadline 與 host 限制的
+  blocking wait；terminal evidence 可提早喚醒，不會等滿 window。
+- `wait_agent` 可能因 mailbox activity 或 timeout 返回，兩者都不證明所有 spawned children 已
+  terminal；必須逐一取得 terminal evidence。沒有新 evidence 的 timeout 不得立即重送相同 wait，
+  deadline 到仍缺 evidence 時要回報 blocker，不能宣稱整個 wave 已 join。
 
 ### 品質
 

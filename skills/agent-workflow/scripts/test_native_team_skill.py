@@ -105,9 +105,36 @@ class NativeTeamSkillTests(unittest.TestCase):
 
     def test_polling_and_progress_ceremony_are_rejected(self) -> None:
         self.assertIn("Do not poll agent status", SKILL_COMPACT)
-        self.assertIn("narrate \"still running\"", SKILL)
+        self.assertIn("narrate \"still running\"", SKILL_COMPACT)
         self.assertIn("or use shell waits", SKILL)
-        self.assertIn("Use native terminal notifications", SKILL)
+        self.assertIn("direct-parent terminal callbacks as the primary completion surface", SKILL_COMPACT)
+        self.assertIn("blocking mailbox wait, not a durable multi-worker all-terminal barrier", SKILL_COMPACT)
+        self.assertIn("one wait using the longest host-safe window", SKILL_COMPACT)
+        self.assertIn("terminal evidence may return it early", SKILL_COMPACT)
+        self.assertIn("do not immediately issue an identical re-wait", SKILL_COMPACT)
+        self.assertIn("do not send progress chatter", SKILL_COMPACT)
+        self.assertIn(
+            "communicate only material evidence or dependencies that can change a decision",
+            SKILL_COMPACT,
+        )
+
+    def test_wait_results_do_not_overclaim_all_terminal(self) -> None:
+        self.assertIn("Any mailbox update or timeout may return it", SKILL_COMPACT)
+        self.assertIn("neither proves every spawned child is terminal", SKILL_COMPACT)
+        self.assertIn("Track terminal evidence for every spawned child", SKILL_COMPACT)
+        self.assertIn("report the blocker instead of claiming that the wave joined", SKILL_COMPACT)
+        for guide in (README_ZH, README_EN):
+            with self.subTest(document=guide.splitlines()[0]):
+                guide_compact = " ".join(guide.split())
+                self.assertRegex(
+                    guide_compact,
+                    r"direct-parent terminal callback|direct-parent terminal callbacks",
+                )
+                self.assertIn("deadline", guide_compact)
+                self.assertRegex(
+                    guide_compact.lower(),
+                    r"mailbox activity.*timeout|mailbox.*activity.*timeout",
+                )
 
     def test_external_actions_remain_human_boundaries(self) -> None:
         for action in ("Commit", "push", "publish", "deploy", "release", "production mutation"):
@@ -138,6 +165,14 @@ class NativeTeamSkillTests(unittest.TestCase):
         ):
             self.assertIn(phrase, OPENAI_INTERFACE)
         self.assertEqual(OPENAI_INTERFACE.count("default_prompt:"), 1)
+        for phrase in (
+            "direct-parent terminal callbacks",
+            "timeout with no new evidence",
+            "do not immediately issue an identical re-wait",
+            "terminal evidence for every spawned child",
+        ):
+            with self.subTest(interface_wait_phrase=phrase):
+                self.assertIn(phrase, OPENAI_INTERFACE)
         self.assertIn("| `agent-workflow` | Stable |", ROOT_README)
         self.assertIn("Agent Workflow 1.0 is the public", ROOT_README)
 
@@ -176,6 +211,27 @@ class NativeTeamSkillTests(unittest.TestCase):
         for concept in ("parallel", "disjoint", "overlap", "fresh verifier", "unsupported"):
             with self.subTest(concept=concept):
                 self.assertIn(concept, joined.lower())
+        for concept in ("deadline-aligned", "no-evidence timeout", "all-terminal"):
+            with self.subTest(wait_concept=concept):
+                self.assertIn(concept, joined.lower())
+        wait_eval = next(item for item in data["evals"] if item["id"] == 5)
+        wait_prompt = wait_eval["prompt"]
+        wait_contract = "\n".join(
+            [wait_eval["expected_output"], *wait_eval["assertions"]]
+        ).lower()
+        self.assertIn("兩個 fresh specialists", wait_prompt)
+        self.assertIn("第二個仍 active", wait_prompt)
+        self.assertIn("沒有新 evidence", wait_prompt)
+        for concept in (
+            "direct-parent terminal callbacks",
+            "progress chatter",
+            "no-evidence timeout",
+            "immediately issue an identical re-wait",
+            "durable multi-worker all-terminal barrier",
+            "terminal evidence for every spawned child",
+        ):
+            with self.subTest(wait_eval_concept=concept):
+                self.assertIn(concept, wait_contract)
         for item in data["evals"]:
             self.assertTrue(item["prompt"].strip())
             self.assertTrue(item["expected_output"].strip())

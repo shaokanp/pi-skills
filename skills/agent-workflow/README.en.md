@@ -58,6 +58,16 @@ flowchart LR
 - Source writers run in parallel only with clearly disjoint ownership; otherwise
   one writer receives parallel read-only support.
 - The Orchestrator does not duplicate active worker investigation or poll status.
+- Native direct-parent terminal callbacks are the primary completion surface.
+  Specialists send no progress chatter; before the terminal deliverable, they
+  communicate only material evidence or dependencies that can change a decision.
+- If the Orchestrator must block at a decision point, it uses one host-safe wait
+  aligned with the task deadline; terminal evidence can return it early instead
+  of consuming the window.
+- Mailbox activity or timeout may return `wait_agent`; neither proves every
+  spawned child is terminal. Track terminal evidence individually. A no-evidence
+  timeout must not trigger an immediate identical re-wait; at the deadline,
+  report missing evidence as a blocker instead of claiming the wave joined.
 
 ### Quality
 

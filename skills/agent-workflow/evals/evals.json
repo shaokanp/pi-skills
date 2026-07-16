@@ -51,6 +51,21 @@
         "Does not silently fall back to a single-agent simulation",
         "Does not invoke an external agent CLI"
       ]
+    },
+    {
+      "id": 5,
+      "name": "staggered_specialists_wait_without_polling",
+      "prompt": "Agent Workflow：讓兩個 fresh specialists 平行執行需要幾分鐘的唯讀分析；第一個會先完成，第二個仍 active。Orchestrator 做完可用的 integration 後，第一次 blocking wait 在沒有新 evidence 時 timeout，後來第一個 terminal callback 抵達。不要輪詢進度，也不要把第一個 callback 誤認為整個 wave 已完成。",
+      "expected_output": "The Orchestrator uses direct-parent terminal callbacks as primary completion evidence, does useful integration first, and if it must block uses one host-safe deadline-aligned mailbox wait for that decision point. A no-evidence timeout does not trigger an immediate identical re-wait. The first child's callback does not prove the second child is terminal; completion requires terminal evidence for every spawned child.",
+      "files": [],
+      "assertions": [
+        "Uses direct-parent terminal callbacks as primary completion evidence",
+        "Specialists send no progress chatter",
+        "Uses one deadline-aligned blocking wait for that decision point only when useful local work is exhausted",
+        "After a no-evidence timeout, does not immediately issue an identical re-wait",
+        "Does not treat wait_agent as a durable multi-worker all-terminal barrier",
+        "Requires terminal evidence for every spawned child"
+      ]
     }
   ]
 }
